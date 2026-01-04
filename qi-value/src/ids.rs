@@ -19,10 +19,6 @@
 #[qi(value(crate = "crate", transparent))]
 pub struct ServiceId(pub u32);
 
-impl ServiceId {
-    pub const DEFAULT: Self = Self(0);
-}
-
 #[derive(
     Default,
     Clone,
@@ -42,12 +38,9 @@ impl ServiceId {
 )]
 #[serde(transparent)]
 #[qi(value(crate = "crate", transparent))]
+// TODO: move this in object
 pub struct ObjectId(pub u32);
 
-impl ObjectId {
-    pub const DEFAULT: Self = Self(0);
-}
-
 #[derive(
     Default,
     Clone,
@@ -67,11 +60,10 @@ impl ObjectId {
 )]
 #[serde(transparent)]
 #[qi(value(crate = "crate", transparent))]
+// TODO: move this in object
 pub struct ActionId(pub u32);
 
 impl ActionId {
-    pub const DEFAULT: Self = Self(0);
-
     pub fn wrapping_next(&mut self) -> Self {
         let old_id = self.0;
         self.0 = self.0.wrapping_add(1);

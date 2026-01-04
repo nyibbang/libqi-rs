@@ -12,6 +12,7 @@ rust-version.workspace = true
 async-trait = { workspace = true }
 derive_more = { workspace = true }
 bytes = { workspace = true }
+either = { workspace = true }
 futures = { workspace = true }
 once_cell = { workspace = true }
 qi-format = { path = "../qi-format" }
@@ -24,9 +25,11 @@ serde_with = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
+ouroboros = "0.18.5"
 
 [dev-dependencies]
 assert_matches = { workspace = true }

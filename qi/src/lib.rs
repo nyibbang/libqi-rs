@@ -11,6 +11,7 @@
     clippy::format_push_string,
     clippy::get_unwrap,
     clippy::if_then_some_else_none,
+    clippy::implicit_clone,
     clippy::integer_division,
     clippy::large_include_file,
     clippy::let_underscore_must_use,
@@ -29,7 +30,6 @@
     clippy::mod_module_files,
     clippy::str_to_string,
     clippy::string_slice,
-    clippy::string_to_string,
     clippy::todo,
     clippy::try_err,
     clippy::unimplemented,
@@ -41,6 +41,7 @@
 #![doc(test(attr(deny(warnings))))]
 #![doc = include_str!("../README.md")]
 
+pub mod auth;
 mod error;
 pub mod node;
 pub mod object;
@@ -50,13 +51,13 @@ pub(crate) mod session;
 pub mod signal;
 pub mod value;
 
+pub(crate) use self::{error::NoHandlerError, object::BoxObject};
 pub use self::{
-    error::{BoxError, Error, HandlerError},
+    error::{BoxError, Error, FormatError, HandlerError},
     node::Node,
-    object::{Object, ObjectExt},
+    object::{Object, ObjectClient, ObjectExt},
     service_directory::ServiceDirectory,
-    session::auth,
-    value::Value,
+    signal::{BasicSignal, Signal},
 };
 pub use qi_format as format;
 pub use qi_macros::{object, FromValue, IntoValue, Reflect, ToValue, Valuable};

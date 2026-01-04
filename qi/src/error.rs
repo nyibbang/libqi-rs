@@ -1,4 +1,5 @@
 use crate::{
+    format,
     messaging::{self, message},
     value,
 };
@@ -9,7 +10,7 @@ pub enum Error {
     CallCanceled,
 
     #[error("there is no object method with identifier {0}")]
-    MethodNotFound(value::object::MemberIdent),
+    MethodNotFound(value::object::ActionNameOrId),
 
     #[error(transparent)]
     Other(#[from] BoxError),
@@ -31,6 +32,18 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl From<String> for Error {
+    fn from(message: String) -> Self {
+        Self::Other(message.into())
+    }
+}
+
+impl From<&str> for Error {
+    fn from(message: &str) -> Self {
+        Self::Other(message.into())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ValueConversionError {
     #[error("the conversion of the object method return value has failed")]
@@ -47,25 +60,22 @@ impl From<ValueConversionError> for Error {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FormatError<E> {
+pub enum FormatError {
     #[error("the serialization of the request arguments has failed")]
-    ArgumentsSerialization(#[source] E),
+    ArgumentsSerialization(#[source] format::Error),
 
     #[error("the deserialization of the request arguments has failed")]
-    ArgumentsDeserialization(#[source] E),
+    ArgumentsDeserialization(#[source] format::Error),
 
     #[error("the serialization of the method return value has failed")]
-    MethodReturnValueSerialization(#[source] E),
+    MethodReturnValueSerialization(#[source] format::Error),
 
     #[error("the deserialization of the method return value has failed")]
-    MethodReturnValueDeserialization(#[source] E),
+    MethodReturnValueDeserialization(#[source] format::Error),
 }
 
-impl<E> From<FormatError<E>> for crate::Error
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn from(err: FormatError<E>) -> Self {
+impl From<FormatError> for crate::Error {
+    fn from(err: FormatError) -> Self {
         Error::Other(err.into())
     }
 }
@@ -113,12 +123,36 @@ impl HandlerError {
     }
 }
 
-impl messaging::handler::Error for HandlerError {
+impl messaging::handler::CallError for HandlerError {
     fn is_canceled(&self) -> bool {
         matches!(self, Self::CallCanceled)
     }
 
     fn is_fatal(&self) -> bool {
         matches!(self, Self::Custom { is_fatal: true, .. })
+    }
+}
+
+impl From<Error> for HandlerError {
+    fn from(err: Error) -> Self {
+        if let Error::CallCanceled = err {
+            return Self::CallCanceled;
+        }
+        Self::Custom {
+            message: err.to_string(),
+            is_fatal: true,
+        }
+    }
+}
+
+impl From<tokio::task::JoinError> for HandlerError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        if err.is_cancelled() {
+            return Self::CallCanceled;
+        }
+        Self::Custom {
+            message: err.to_string(),
+            is_fatal: false,
+        }
     }
 }

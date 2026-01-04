@@ -1,55 +1,56 @@
-pub mod auth;
 mod capabilities;
-pub(crate) mod control;
-mod map;
+mod control;
+mod store;
 mod target;
 
-use self::auth::PermissiveAuthenticator;
-pub(crate) use self::{auth::Authenticator, map::Map, target::Target};
+pub(crate) use self::{store::Store, target::Target};
 use crate::{
-    error::{Error, FormatError, HandlerError},
+    auth::Authenticator,
+    error::{Error, HandlerError},
     messaging::{self, message},
-    value::{self, KeyDynValueMap},
+    value::{self, FormatInto, IntoFormat, KeyDynValueMap, Value},
 };
 use control::Control;
 use futures::{stream::FusedStream, Sink, StreamExt, TryStream};
 use qi_messaging::Address;
-use std::{net::SocketAddr, pin::pin};
+use std::{net::SocketAddr, pin::pin, sync::Arc};
 use tokio::{select, sync::watch, task, time};
+use tokio_util::task::AbortOnDropHandle;
 
-pub(crate) struct Session<Body> {
+pub(crate) struct Session {
     capabilities: watch::Receiver<Option<KeyDynValueMap>>,
-    client: messaging::Client<Body>,
+    client: messaging::Client,
 }
 
-impl<Body> Session<Body>
-where
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
+impl Session {
     pub(crate) async fn connect<MsgStream, MsgSink, Handler>(
-        messages_stream: MsgStream,
-        messages_sink: MsgSink,
+        messages_in: MsgStream,
+        messages_out: MsgSink,
         credentials: KeyDynValueMap,
         handler: Handler,
     ) -> Result<Self, Error>
     where
-        MsgStream: TryStream<Ok = messaging::Message<Body>> + Send + 'static,
+        MsgStream: TryStream<Ok = messaging::Message> + Send + 'static,
         MsgStream::Error: Send,
-        MsgSink: Sink<messaging::Message<Body>> + Send + 'static,
-        Handler: messaging::Handler<Body, Error = HandlerError> + Send + Sync + 'static,
+        MsgSink: Sink<messaging::Message> + Send + 'static,
+        MsgSink::Error: Send,
+        Handler: messaging::CallHandler
+            + messaging::EventHandler
+            + messaging::PostHandler
+            + Send
+            + Sync
+            + 'static,
+        Handler::Error: Into<HandlerError> + 'static,
     {
         let Control {
             controller,
             capabilities,
             handler,
             ..
-        } = control::make(handler, PermissiveAuthenticator, true);
+        } = control::create(handler, None, true);
         let (mut client, connection) =
-            messaging::endpoint::start(messages_stream, messages_sink, handler);
-        task::spawn(async move {
-            let _res = connection.await;
-        });
+            messaging::endpoint::start(messages_in, messages_out, handler);
+        task::spawn(connection);
         controller
             .authenticate_to_server(&mut client, credentials)
             .await?;
@@ -59,132 +60,41 @@ where
         })
     }
 
-    /// Binds a server of sessions to an address.
-    ///
-    /// Spawn a server task that:
-    ///   1) spawns a session server side with the given authenticator and messaging handler each
-    ///      time a client connects to the server.
-    ///   2) updates a list of endpoints for this session. The list of endpoints changes if the
-    ///      address targets multiple interfaces and interfaces availability changes on the system.
-    ///
-    /// The future terminates when the server is bound and clients can connect. The return value is a
-    /// watch receiver of a pair of:
-    ///   - a local address that the server is bound to.
-    ///   - a list of endpoints that clients can connect to.
-    ///
-    /// The receiver is severed from its sender when the server is stopped.
-    pub(crate) async fn server<Auth, Handler>(
-        address: messaging::Address,
-        authenticator: Auth,
-        handler: Handler,
-    ) -> Result<Server, std::io::Error>
-    where
-        Auth: Authenticator + Clone + Send + Sync + 'static,
-        Handler: messaging::Handler<Body, Error = HandlerError> + Send + Sync + Clone + 'static,
-    {
-        let (clients, local_address) = messaging::channel::serve(address).await?;
-        let (mut endpoints_sender, endpoints_receiver) =
-            watch::channel((local_address, Vec::new()));
-        let task = task::spawn(async move {
-            let mut clients = pin!(clients.fuse());
-            let mut update_endpoints = pin!(update_address_endpoints(
-                local_address,
-                &mut endpoints_sender
-            ));
-            // Use a join set so that when this task is dropped, all spawned client session tasks are aborted.
-            let mut client_tasks = task::JoinSet::new();
-            loop {
-                select! {
-                    Some((messages_stream, messages_sink, _address)) = clients.next(), if !clients.is_terminated() => {
-                        client_tasks.spawn(Session::serve_client(
-                            messages_stream,
-                            messages_sink,
-                            authenticator.clone(),
-                            handler.clone(),
-                        ));
-                    }
-                    () = &mut update_endpoints => {
-                        // nothing, if this future terminates it means that the address was not an
-                        // "ANY" IP address. The endpoints sender must not be dropped.
-                    }
-                    else => {
-                        break;
-                    }
-                }
-            }
-        });
-        Ok(Server {
-            endpoints: endpoints_receiver,
-            task,
-        })
-    }
-
-    pub(crate) async fn serve_client<Auth, MsgStream, MsgSink, Handler>(
-        messages_stream: MsgStream,
-        messages_sink: MsgSink,
-        authenticator: Auth,
-        handler: Handler,
-    ) where
-        MsgStream: TryStream<Ok = messaging::Message<Body>> + Send + 'static,
-        MsgStream::Error: Send,
-        MsgSink: Sink<messaging::Message<Body>> + Send + 'static,
-        Auth: Authenticator + Send + Sync + 'static,
-        Handler: messaging::Handler<Body, Error = HandlerError> + Send + Sync + 'static,
-    {
-        let Control {
-            capabilities,
-            mut remote_authorized,
-            handler,
-            ..
-        } = control::make(handler, authenticator, true);
-        let (client, connection) =
-            messaging::endpoint::start(messages_stream, messages_sink, handler);
-        let mut _session = None;
-        task::spawn(async move {
-            let _res = connection.await;
-        });
-
-        while let Ok(()) = remote_authorized.changed().await {
-            if *remote_authorized.borrow_and_update() {
-                _session = Some(Session {
-                    capabilities: capabilities.clone(),
-                    client: client.clone(),
-                })
-            } else {
-                _session = None;
-            }
-        }
-    }
-
     pub(crate) async fn call(
         &self,
         address: message::Address,
-        value: value::Value<'_>,
+        args: Value<'_>,
         return_type: Option<&value::Type>,
-    ) -> Result<value::Value<'static>, Error> {
-        let args = Body::serialize(&value).map_err(FormatError::ArgumentsSerialization)?;
-        Ok(self
-            .client
-            .call(address, args)
+    ) -> Result<Value<'static>, Error> {
+        self.client
+            .call(address, args.into_format_args()?)
             .await?
-            .deserialize_seed(value::de::ValueType(return_type))
-            .map_err(FormatError::MethodReturnValueDeserialization)?
-            .into_owned())
+            .into_return_value(return_type)
     }
 
-    pub(crate) async fn fire_and_forget(
+    pub(crate) async fn post(
         &self,
         address: message::Address,
-        request: message::FireAndForget<value::Value<'_>>,
+        args: Value<'_>,
     ) -> Result<(), Error> {
-        let request = request
-            .try_map(|value| Body::serialize(&value))
-            .map_err(FormatError::ArgumentsSerialization)?;
-        self.client.fire_and_forget(address, request).await?;
+        self.client
+            .post(address, args.into_format_args()?)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(crate) async fn send_event(
+        &self,
+        address: message::Address,
+        value: Value<'_>,
+    ) -> Result<(), Error> {
+        self.client
+            .send_event(address, value.into_format_args()?)
+            .await?;
         Ok(())
     }
 
-    pub(crate) fn downgrade(&self) -> WeakSession<Body> {
+    pub(crate) fn downgrade(&self) -> WeakSession {
         WeakSession {
             capabilities: self.capabilities.clone(),
             client: self.client.downgrade(),
@@ -192,7 +102,7 @@ where
     }
 }
 
-impl<Body> Clone for Session<Body> {
+impl Clone for Session {
     fn clone(&self) -> Self {
         Self {
             capabilities: self.capabilities.clone(),
@@ -201,7 +111,7 @@ impl<Body> Clone for Session<Body> {
     }
 }
 
-impl<Body> std::fmt::Debug for Session<Body> {
+impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("capabilities", &self.capabilities)
@@ -210,13 +120,13 @@ impl<Body> std::fmt::Debug for Session<Body> {
     }
 }
 
-pub(crate) struct WeakSession<Body> {
+pub(crate) struct WeakSession {
     capabilities: watch::Receiver<Option<KeyDynValueMap>>,
-    client: messaging::WeakClient<Body>,
+    client: messaging::WeakClient,
 }
 
-impl<Body> WeakSession<Body> {
-    pub(crate) fn upgrade(&self) -> Option<Session<Body>> {
+impl WeakSession {
+    pub(crate) fn upgrade(&self) -> Option<Session> {
         self.client.upgrade().map(|client| Session {
             capabilities: self.capabilities.clone(),
             client,
@@ -224,7 +134,7 @@ impl<Body> WeakSession<Body> {
     }
 }
 
-impl<Body> Clone for WeakSession<Body> {
+impl Clone for WeakSession {
     fn clone(&self) -> Self {
         Self {
             capabilities: self.capabilities.clone(),
@@ -233,7 +143,7 @@ impl<Body> Clone for WeakSession<Body> {
     }
 }
 
-impl<Body> std::fmt::Debug for WeakSession<Body> {
+impl std::fmt::Debug for WeakSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WeakSession")
             .field("capabilities", &self.capabilities)
@@ -242,23 +152,113 @@ impl<Body> std::fmt::Debug for WeakSession<Body> {
     }
 }
 
+/// Binds a server of sessions to an address.
+///
+/// Spawn a server task that:
+///   1) spawns a session server side with the given authenticator and messaging handler each
+///      time a client connects to the server.
+///   2) updates a list of endpoints for this session. The list of endpoints changes if the
+///      address targets multiple interfaces and interfaces availability changes on the system.
+///
+/// The future terminates when the server is bound and clients can connect. The return value is a
+/// watch receiver of a pair of:
+///   - a local address that the server is bound to.
+///   - a list of endpoints that clients can connect to.
+///
+/// The receiver is severed from its sender when the server is stopped.
+pub(crate) async fn server<Handler>(
+    address: messaging::Address,
+    authenticator: Option<Arc<dyn Authenticator + Send + Sync>>,
+    handler: Handler,
+) -> Result<(Server, ServerEndpointsWatcher), std::io::Error>
+where
+    Handler: messaging::CallHandler
+        + messaging::EventHandler
+        + messaging::PostHandler
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Handler::Error: Into<HandlerError>,
+{
+    let (clients, local_address) = messaging::channel::serve(address).await?;
+    let (mut endpoints_sender, endpoints_receiver) = watch::channel((local_address, Vec::new()));
+    let task = task::spawn(async move {
+        let mut clients = pin!(clients.fuse());
+        let mut update_endpoints = pin!(update_address_endpoints(
+            local_address,
+            &mut endpoints_sender
+        ));
+        // Use a join set so that when this task is dropped, all spawned client session tasks are aborted.
+        let mut client_tasks = task::JoinSet::new();
+        loop {
+            select! {
+                Some((messages_stream, messages_sink, _address)) = clients.next(), if !clients.is_terminated() => {
+                    client_tasks.spawn(serve_client(
+                        messages_stream,
+                        messages_sink,
+                        authenticator.clone(),
+                        handler.clone(),
+                    ));
+                }
+                () = &mut update_endpoints => {
+                    // nothing, if this future terminates it means that the address was not an
+                    // "ANY" IP address. The endpoints sender must not be dropped.
+                }
+                else => {
+                    break;
+                }
+            }
+        }
+    });
+    Ok((Server(AbortOnDropHandle::new(task)), endpoints_receiver))
+}
+
+pub(crate) async fn serve_client<MsgStream, MsgSink, Handler>(
+    messages_stream: MsgStream,
+    messages_sink: MsgSink,
+    authenticator: Option<Arc<dyn Authenticator + Send + Sync>>,
+    handler: Handler,
+) where
+    MsgStream: TryStream<Ok = messaging::Message> + Send + 'static,
+    MsgStream::Error: Send,
+    MsgSink: Sink<messaging::Message> + Send + 'static,
+    Handler: messaging::CallHandler
+        + messaging::EventHandler
+        + messaging::PostHandler
+        + Send
+        + Sync
+        + 'static,
+    Handler::Error: Into<HandlerError>,
+{
+    let Control {
+        capabilities,
+        mut remote_authorized,
+        handler,
+        ..
+    } = control::create(handler, authenticator, false);
+    let (client, connection) = messaging::endpoint::start(messages_stream, messages_sink, handler);
+    let mut _session = None;
+    task::spawn(async move {
+        let _res = connection.await;
+    });
+
+    while let Ok(()) = remote_authorized.changed().await {
+        if *remote_authorized.borrow_and_update() {
+            _session = Some(Session {
+                capabilities: capabilities.clone(),
+                client: client.clone(),
+            })
+        } else {
+            _session = None;
+        }
+    }
+}
+
 #[derive(Debug)]
-pub(crate) struct Server {
-    endpoints: watch::Receiver<(Address, Vec<Address>)>,
-    task: task::JoinHandle<()>,
-}
+pub(crate) struct Server(#[allow(dead_code)] AbortOnDropHandle<()>);
 
-impl Server {
-    pub(crate) fn endpoints_receiver(&mut self) -> &mut watch::Receiver<(Address, Vec<Address>)> {
-        &mut self.endpoints
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
+pub(crate) type ServerEndpointsWatcher = watch::Receiver<(Address, Vec<Address>)>;
 
 const NETWORK_INTERFACES_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -315,69 +315,37 @@ async fn update_address_endpoints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messaging::Message;
+    use crate::{auth, messaging::Message};
     use assert_matches::assert_matches;
+    use bytes::Bytes;
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use qi_messaging::Body;
-    use serde_json as json;
-    use std::{
-        collections::VecDeque,
-        convert::Infallible,
-        future::{ready, Future},
-    };
+    use std::{convert::Infallible, future::Future};
     use tokio::spawn;
 
     #[derive(Clone, Copy)]
     struct DummyHandler;
 
-    impl messaging::Handler<JsonBody> for DummyHandler {
+    impl messaging::CallHandler for DummyHandler {
         type Error = HandlerError;
 
-        async fn call(
-            &self,
+        #[allow(clippy::manual_async_fn)]
+        fn handle_call(
+            &mut self,
             _address: message::Address,
-            value: JsonBody,
-        ) -> Result<JsonBody, Self::Error> {
-            Ok(value)
-        }
-
-        fn fire_and_forget(
-            &self,
-            _address: message::Address,
-            _request: message::FireAndForget<JsonBody>,
-        ) -> impl Future<Output = ()> + Send {
-            ready(())
+            args: Bytes,
+        ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send + 'static {
+            async move { Ok(args) }
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct JsonBody(json::Value);
-
-    impl messaging::Body for JsonBody {
-        type Error = json::Error;
-        type Data = VecDeque<u8>;
-
-        fn from_bytes(bytes: bytes::Bytes) -> Result<Self, Self::Error> {
-            json::from_slice(&bytes).map(Self)
-        }
-
-        fn into_data(self) -> Result<Self::Data, Self::Error> {
-            json::to_vec(&self.0).map(Into::into)
-        }
-
-        fn serialize<T>(value: &T) -> Result<Self, Self::Error>
-        where
-            T: serde::Serialize,
-        {
-            json::to_value(value).map(Self)
-        }
-
-        fn deserialize_seed<'de, T>(&'de self, seed: T) -> Result<T::Value, Self::Error>
-        where
-            T: serde::de::DeserializeSeed<'de>,
-        {
-            seed.deserialize(self.0.clone())
-        }
+    impl messaging::EventHandler for DummyHandler {
+        fn handle_event(&mut self, _address: message::Address, _args: Bytes) {}
+    }
+    impl messaging::PostHandler for DummyHandler {
+        fn handle_post(&mut self, _address: message::Address, _args: Bytes) {}
+    }
+    impl messaging::CapabilitiesHandler for DummyHandler {
+        fn handle_capabilities(&mut self, _address: message::Address, _map: KeyDynValueMap) {}
     }
 
     /// The server session receives an authentication request with incompatible capabilities.
@@ -390,10 +358,10 @@ mod tests {
         // 0.1: start the server session
         let (mut send_to_server, server_recv) = mpsc::unbounded();
         let (server_send, mut recv_from_server) = mpsc::unbounded();
-        let task = spawn(Session::serve_client(
+        let task = spawn(serve_client(
             server_recv.map(Ok::<_, Infallible>),
             server_send.sink_map_err(qi_messaging::Error::link_lost),
-            auth::PermissiveAuthenticator,
+            None,
             DummyHandler,
         ));
 
@@ -402,13 +370,14 @@ mod tests {
             .send(Message::Call {
                 id: message::Id(0),
                 address: control::AUTHENTICATE_ADDRESS,
-                value: JsonBody::serialize(&{
+                payload: {
                     let mut map = KeyDynValueMap::new();
                     map.set("RemoteCancelableCalls", true);
                     map.set("ObjectPtrUID", true);
                     map.set("RelativeEndpointURI", false); // A required capabilities is set to false.
                     map
-                })
+                }
+                .into_format()
                 .unwrap(),
             })
             .await
@@ -464,13 +433,14 @@ mod tests {
             .send(Message::Reply {
                 id: message::Id(1),
                 address: control::AUTHENTICATE_ADDRESS,
-                value: JsonBody::serialize(&{
+                payload: {
                     let mut map = KeyDynValueMap::new();
                     map.set("RemoteCancelableCalls", true);
                     map.set("ObjectPtrUID", true);
                     map.set("RelativeEndpointURI", false); // A required capabilities is set to false.
                     map
-                })
+                }
+                .into_format()
                 .unwrap(),
             })
             .await
@@ -491,10 +461,10 @@ mod tests {
         // 0.1: start the server session
         let (mut send_to_server, server_recv) = mpsc::unbounded();
         let (server_send, mut recv_from_server) = mpsc::unbounded();
-        spawn(Session::serve_client(
+        spawn(serve_client(
             server_recv.map(Ok::<_, Infallible>),
             server_send.sink_map_err(qi_messaging::Error::link_lost),
-            auth,
+            Some(Arc::new(auth)),
             DummyHandler,
         ));
 
@@ -503,7 +473,7 @@ mod tests {
             .send(Message::Call {
                 id: message::Id(0),
                 address: control::AUTHENTICATE_ADDRESS,
-                value: JsonBody::serialize(&{
+                payload: {
                     let mut map = KeyDynValueMap::new();
                     map.set("RemoteCancelableCalls", true);
                     map.set("ObjectPtrUID", true);
@@ -511,7 +481,8 @@ mod tests {
                     map.set(auth::USER_KEY, "myuser");
                     map.set(auth::TOKEN_KEY, "mytoken");
                     map
-                })
+                }
+                .into_format()
                 .unwrap(),
             })
             .await
@@ -524,11 +495,11 @@ mod tests {
             Message::Reply {
                 address: control::AUTHENTICATE_ADDRESS,
                 id: message::Id(0),
-                value: body
+                payload: body
             } => body
         );
 
-        let mut map: KeyDynValueMap = body.deserialize().unwrap();
+        let mut map: KeyDynValueMap = body.to_reflect_value().unwrap();
         let state: u32 = map
             .remove(auth::STATE_KEY)
             .unwrap_or_else(|| panic!("missing state key in map {map:?}"))
@@ -550,10 +521,10 @@ mod tests {
         // 0.1: start the server session
         let (mut send_to_server, server_recv) = mpsc::unbounded();
         let (server_send, mut recv_from_server) = mpsc::unbounded();
-        let task = spawn(Session::serve_client(
+        let task = spawn(serve_client(
             server_recv.map(Ok::<_, Infallible>),
             server_send.sink_map_err(qi_messaging::Error::link_lost),
-            auth,
+            Some(Arc::new(auth)),
             DummyHandler,
         ));
 
@@ -562,7 +533,7 @@ mod tests {
             .send(Message::Call {
                 id: message::Id(0),
                 address: control::AUTHENTICATE_ADDRESS,
-                value: JsonBody::serialize(&{
+                payload: {
                     let mut map = KeyDynValueMap::new();
                     map.set("RemoteCancelableCalls", true);
                     map.set("ObjectPtrUID", true);
@@ -570,7 +541,8 @@ mod tests {
                     map.set(auth::USER_KEY, "myuser");
                     map.set(auth::TOKEN_KEY, "badtoken"); // token is not correct
                     map
-                })
+                }
+                .into_format()
                 .unwrap(),
             })
             .await

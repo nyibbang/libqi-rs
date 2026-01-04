@@ -1,4 +1,4 @@
-use crate::{AsDynamicOwned, FromValue, IntoValue, Value};
+use crate::{AsDynamicOwned, FromValue, FromValueError, IntoValue, Reflect, Type, Value};
 use serde_with::serde_as;
 use std::collections::HashMap;
 
@@ -80,5 +80,37 @@ impl FromIterator<(String, Value<'static>)> for KeyDynValueMap {
 impl Extend<(String, Value<'static>)> for KeyDynValueMap {
     fn extend<T: IntoIterator<Item = (String, Value<'static>)>>(&mut self, iter: T) {
         self.0.extend(iter)
+    }
+}
+
+// TODO: derive Valuable
+impl Reflect for KeyDynValueMap {
+    fn ty() -> Option<crate::Type> {
+        Some(Type::map_of(Type::String, None))
+    }
+}
+
+impl<'a> IntoValue<'a> for KeyDynValueMap {
+    fn into_value(self) -> Value<'a> {
+        Value::Map(
+            self.into_iter()
+                .map(|(k, v)| (k.into_value(), v.into_value()))
+                .collect(),
+        )
+    }
+}
+
+impl<'a> FromValue<'a> for KeyDynValueMap {
+    fn from_value(value: Value<'a>) -> Result<Self, crate::FromValueError> {
+        match value {
+            Value::Map(map) => map
+                .into_iter()
+                .map(|(k, v)| Ok((k.cast_into()?, v.into_owned())))
+                .collect(),
+            _ => Err(FromValueError::TypeMismatch {
+                expected: "a KeyDynValueMap".to_owned(),
+                actual: value.to_string(),
+            }),
+        }
     }
 }

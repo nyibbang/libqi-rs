@@ -9,8 +9,10 @@ use ordered_float::OrderedFloat;
 use std::{borrow::Cow, string::String as StdString};
 
 /// The [`Value`] structure represents any value of the `qi` type system.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+/// TODO: Should this be just a trait ?
+#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Value<'a> {
+    #[default]
     Unit,
     Bool(bool),
     Int8(i8),
@@ -93,12 +95,6 @@ impl<'a> Value<'a> {
             Self::Object(v) => Value::Object(v),
             Self::Dynamic(v) => Value::Dynamic(Box::new(v.into_owned())),
         }
-    }
-}
-
-impl Default for Value<'_> {
-    fn default() -> Self {
-        Self::Unit
     }
 }
 
@@ -225,6 +221,7 @@ pub trait IntoValue<'a>: Sized {
     fn into_value(self) -> Value<'a>;
 }
 
+// TODO: remove this trait
 pub trait ToValue {
     fn to_value(&self) -> Value<'_>;
 }

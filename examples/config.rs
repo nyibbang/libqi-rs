@@ -1,4 +1,4 @@
-use std::{convert::Infallible, str::FromStr};
+use std::str::FromStr;
 
 #[derive(Debug, clap::Parser)]
 #[command(version, about, long_about = None)]

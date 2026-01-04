@@ -1,26 +1,25 @@
 use crate::{
-    handler,
+    handler::{self, CallError},
     message::{Address, Id},
     Message,
 };
 use bytes::Bytes;
 use futures::{
-    future::BoxFuture,
     stream::{FusedStream, FuturesUnordered},
-    FutureExt, Stream, StreamExt, TryFutureExt,
+    Stream, StreamExt, TryFuture,
 };
+use pin_project_lite::pin_project;
 use std::{
     future::Future,
     pin::Pin,
     task::{ready, Context, Poll, Waker},
 };
 
-#[derive(Debug)]
-pub(super) struct CallFutures<E> {
-    call_futures: FuturesUnordered<CallFuture<E>>,
+pub(super) struct CallFutures<F> {
+    call_futures: FuturesUnordered<CallFuture<F>>,
 }
 
-impl<E> Default for CallFutures<E> {
+impl<F> Default for CallFutures<F> {
     fn default() -> Self {
         Self {
             call_futures: Default::default(),
@@ -28,17 +27,21 @@ impl<E> Default for CallFutures<E> {
     }
 }
 
-impl<E> CallFutures<E> {
-    pub(super) fn push<F>(&mut self, id: Id, address: Address, future: F)
-    where
-        F: Future<Output = Result<Bytes, E>> + Send + 'static,
-    {
-        self.call_futures
-            .push(CallFuture::new(id, address, future.boxed()));
+impl<F> std::fmt::Debug for CallFutures<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallFutures")
+            .field("call_futures", &self.call_futures)
+            .finish()
+    }
+}
+
+impl<F> CallFutures<F> {
+    pub(super) fn push(&mut self, id: Id, address: Address, future: F) {
+        self.call_futures.push(CallFuture::new(id, address, future));
     }
 
     pub(super) fn cancel(&mut self, id: &Id) {
-        for call_future in self.call_futures.iter_mut() {
+        for call_future in Pin::new(&mut self.call_futures).iter_pin_mut() {
             if &call_future.id == id {
                 call_future.cancel()
             }
@@ -46,9 +49,9 @@ impl<E> CallFutures<E> {
     }
 }
 
-impl<E> Stream for CallFutures<E>
+impl<F> Stream for CallFutures<F>
 where
-    E: handler::CallError,
+    CallFuture<F>: Future<Output = (Message, DispatchFlow)>,
 {
     type Item = (Message, DispatchFlow);
 
@@ -57,61 +60,75 @@ where
     }
 }
 
-impl<E> FusedStream for CallFutures<E>
+impl<F> FusedStream for CallFutures<F>
 where
-    E: handler::CallError,
+    CallFuture<F>: Future<Output = (Message, DispatchFlow)>,
 {
     fn is_terminated(&self) -> bool {
         self.call_futures.is_terminated()
     }
 }
 
-#[derive(Debug)]
-struct CallFuture<E> {
-    id: Id,
-    address: Address,
-    state: CallResponseFutureState<E>,
+pin_project! {
+    struct CallFuture<F> {
+        id: Id,
+        address: Address,
+        #[pin]
+        state: CallFutureState<F>,
+    }
 }
 
-impl<E> CallFuture<E> {
-    fn new(id: Id, address: Address, inner: BoxFuture<'static, Result<Bytes, E>>) -> Self {
+impl<F> std::fmt::Debug for CallFuture<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallFuture")
+            .field("id", &self.id)
+            .field("address", &self.address)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl<F> CallFuture<F> {
+    fn new(id: Id, address: Address, inner: F) -> Self {
         Self {
             id,
             address,
-            state: CallResponseFutureState::Running { inner, waker: None },
+            state: CallFutureState::Running { inner, waker: None },
         }
     }
 
-    fn cancel(&mut self) {
-        if let CallResponseFutureState::Running { ref mut waker, .. } = self.state {
+    fn cancel(self: Pin<&mut Self>) {
+        let mut this = self.project();
+        let mut state = this.state.as_mut().project();
+        if let CallResponseFutureStateProj::Running { ref mut waker, .. } = state {
             if let Some(waker) = waker.take() {
                 waker.wake();
             }
-            self.state = CallResponseFutureState::Canceled;
+            this.state.set(CallFutureState::Canceled);
         }
     }
 }
 
-impl<E> Future for CallFuture<E>
+impl<F> Future for CallFuture<F>
 where
-    E: handler::CallError,
+    F: TryFuture<Ok = Bytes>,
+    F::Error: handler::CallError,
 {
     type Output = (Message, DispatchFlow);
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.state {
-            CallResponseFutureState::Running {
-                ref mut inner,
-                ref mut waker,
-            } => {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        use CallResponseFutureStateProj as State;
+        match this.state.as_mut().project() {
+            State::Running { inner, waker } => {
                 *waker = Some(cx.waker().clone());
-                let call_result = ready!(inner.try_poll_unpin(cx));
-                self.state = CallResponseFutureState::Terminated;
+                let call_result = ready!(inner.try_poll(cx));
+                this.state.set(CallFutureState::Terminated);
                 match call_result {
                     Ok(reply) => Poll::Ready((
                         Message::Reply {
-                            id: self.id,
-                            address: self.address,
+                            id: *this.id,
+                            address: *this.address,
                             payload: reply,
                         },
                         DispatchFlow::Continue,
@@ -120,16 +137,16 @@ where
                         let message_stop_pair = if error.is_canceled() {
                             (
                                 Message::Canceled {
-                                    id: self.id,
-                                    address: self.address,
+                                    id: *this.id,
+                                    address: *this.address,
                                 },
                                 DispatchFlow::Continue,
                             )
                         } else {
                             (
                                 Message::Error {
-                                    id: self.id,
-                                    address: self.address,
+                                    id: *this.id,
+                                    address: *this.address,
                                     error: error.to_string(),
                                 },
                                 if error.is_fatal() {
@@ -143,17 +160,17 @@ where
                     }
                 }
             }
-            CallResponseFutureState::Canceled => {
-                self.state = CallResponseFutureState::Terminated;
+            State::Canceled => {
+                this.state.set(CallFutureState::Terminated);
                 Poll::Ready((
                     Message::Canceled {
-                        id: self.id,
-                        address: self.address,
+                        id: *this.id,
+                        address: *this.address,
                     },
                     DispatchFlow::Continue,
                 ))
             }
-            CallResponseFutureState::Terminated => {
+            State::Terminated => {
                 debug_assert!(false, "polling a terminated future");
                 Poll::Pending
             }
@@ -161,16 +178,16 @@ where
     }
 }
 
-enum CallResponseFutureState<E> {
-    Running {
-        inner: BoxFuture<'static, Result<Bytes, E>>,
-        waker: Option<Waker>,
-    },
-    Canceled,
-    Terminated,
+pin_project! {
+    #[project = CallResponseFutureStateProj]
+    enum CallFutureState<F> {
+        Running { #[pin] inner: F, waker: Option<Waker> },
+        Canceled,
+        Terminated,
+    }
 }
 
-impl<E> std::fmt::Debug for CallResponseFutureState<E> {
+impl<F> std::fmt::Debug for CallFutureState<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Running { waker, .. } => f.debug_struct("Running").field("waker", waker).finish(),

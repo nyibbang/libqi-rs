@@ -58,19 +58,25 @@ pub fn proc_macro_derive_from_value(input: TokenStream) -> TokenStream {
 /// # mod qi {
 /// #   pub(super) use qi_macros::{object, Valuable};
 /// # }
+/// use async_trait::async_trait;
+///
 /// #[qi::object]
+/// #[async_trait]
 /// trait Motion {
 ///     /// Go to some position.
 ///     #[qi::method]
 ///     async fn go_to(&self, position: Position) -> Result<(), Error>;
 ///
 ///     /// The current position.
-///     #[qi::property]
-///     fn position() -> Position;
+///     #[qi::property(get, name = "Position")]
+///     async fn position() -> Position;
+///
+///     #[qi::property(set, name = "Position")]
+///     async fn set_position(pos: Position);
 ///
 ///     /// The moving state.
 ///     #[qi::signal]
-///     fn moving() -> bool;
+///     async fn on_moving<F>(&self, subscriber: F) where F: FnMut(bool)>;
 /// }
 ///
 /// #[derive(qi::Valuable)]
@@ -85,7 +91,7 @@ pub fn proc_macro_derive_from_value(input: TokenStream) -> TokenStream {
 /// that implements `Motion`.
 #[proc_macro_attribute]
 pub fn object(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    parse_macro_input!(item as object::Object)
-        .to_token_stream()
+    parse_macro_input!(item as object::ObjectTrait)
+        .into_token_stream()
         .into()
 }

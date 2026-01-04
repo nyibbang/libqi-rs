@@ -5,9 +5,11 @@ use crate::{
     Client, Handler, Message,
 };
 use async_stream::stream;
+use bytes::Bytes;
 use either::Either;
 use futures::{
-    pin_mut, stream::FusedStream, Sink, SinkExt, Stream, StreamExt, TryStream, TryStreamExt,
+    future::BoxFuture, pin_mut, stream::FusedStream, FutureExt, Sink, SinkExt, Stream, StreamExt,
+    TryStream, TryStreamExt,
 };
 use std::future::Future;
 use tokio::select;
@@ -134,7 +136,7 @@ where
 struct Dispatch<H, E> {
     handler: H,
     client_requests: client::Requests,
-    server_calls: server::CallFutures<E>,
+    server_calls: server::CallFutures<BoxFuture<'static, Result<Bytes, E>>>,
 }
 
 impl<H> Dispatch<H, H::Error>
@@ -157,7 +159,7 @@ where
                 payload,
             } => {
                 let call_future = self.handler.handle_call(address, payload);
-                self.server_calls.push(id, address, call_future);
+                self.server_calls.push(id, address, call_future.boxed());
             }
             Message::Post {
                 address, payload, ..

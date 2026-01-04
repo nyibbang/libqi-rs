@@ -1,81 +1,60 @@
-mod router_handler;
 mod server;
 
-use self::router_handler::{PendingServiceMap, RouterHandler};
 use crate::{
-    messaging,
-    object::{self, BoxObject, Object},
+    auth::Authenticator,
     service::{self, Info},
     service_directory::{self, ServiceDirectory},
-    session::{
-        self,
-        auth::{Authenticator, PermissiveAuthenticator},
-    },
-    value::{self, os::MachineId},
-    Address, Error,
+    session,
+    value::os::MachineId,
+    Address, BoxObject, Error, Object, ObjectClient, Result,
 };
+use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
 use qi_value::KeyDynValueMap;
-use router_handler::ArcRouterHandler;
 use serde_with::serde_as;
-use server::ServerSet;
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
-use tokio::{sync::Mutex, task};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tokio::task;
+use tracing::warn;
 
-pub struct Builder<Auth, Method, Body> {
+pub fn init() -> InitializingNode<NotSet> {
+    InitializingNode::default()
+}
+
+#[derive(Default)]
+pub struct InitializingNode<Method> {
     uid: Uid,
-    authenticator: Auth,
+    authenticator: Option<Arc<dyn Authenticator + Send + Sync>>,
     bind_addresses: Vec<Address>,
-    pending_services: PendingServiceMap,
+    pending_services: HashMap<String, BoxObject>,
+    services: service::SharedServices,
     method: Method,
-    phantom_body: PhantomData<fn(Body) -> Body>,
 }
 
-impl Builder<PermissiveAuthenticator, (), value::BinaryFormattedValue> {
-    pub fn new() -> Self {
-        Builder::default()
-    }
-}
-
-impl<Auth, Method, Body> Builder<Auth, Method, Body> {
-    pub fn with_authenticator<NewAuth>(
-        self,
-        authenticator: NewAuth,
-    ) -> Builder<NewAuth, Method, Body> {
-        Builder {
-            authenticator,
-            uid: self.uid,
-            bind_addresses: self.bind_addresses,
-            pending_services: self.pending_services,
-            method: self.method,
-            phantom_body: PhantomData,
-        }
+impl<Method> InitializingNode<Method> {
+    pub fn with_authenticator<Auth>(&mut self, authenticator: Auth) -> &mut Self
+    where
+        Auth: Authenticator + Send + Sync + 'static,
+    {
+        self.authenticator = Some(Arc::new(authenticator));
+        self
     }
 
-    pub fn with_body<NewBody>(self) -> Builder<Auth, Method, Body> {
-        Builder {
-            authenticator: self.authenticator,
-            uid: self.uid,
-            bind_addresses: self.bind_addresses,
-            pending_services: self.pending_services,
-            method: self.method,
-            phantom_body: PhantomData,
-        }
-    }
-
-    pub fn add_service<Name, Obj>(mut self, name: Name, object: Obj) -> Self
+    pub fn add_service<Name, Obj>(&mut self, name: Name, object: Obj) -> &mut Self
     where
         Name: std::string::ToString,
         Obj: Object + Send + Sync + 'static,
     {
         self.pending_services
-            .add(name.to_string(), BoxObject::new(object));
+            .insert(name.to_string(), BoxObject::new(object));
         self
     }
 
     /// Binds the node to an address so that it may accept incoming connections on an endpoint at
     /// that address.
-    pub fn bind(mut self, address: Address) -> Self {
+    pub fn bind(&mut self, address: Address) -> &mut Self {
         self.bind_addresses.push(address);
         self
     }
@@ -85,176 +64,151 @@ impl<Auth, Method, Body> Builder<Auth, Method, Body> {
         self,
         address: Address,
         credentials: Option<KeyDynValueMap>,
-    ) -> Builder<Auth, ConnectToSpace, Body> {
-        Builder {
-            authenticator: self.authenticator,
+    ) -> InitializingNode<ConnectToSpace> {
+        InitializingNode {
             uid: self.uid,
+            authenticator: self.authenticator,
+            services: self.services,
             bind_addresses: self.bind_addresses,
             pending_services: self.pending_services,
             method: ConnectToSpace {
                 address,
                 credentials,
             },
-            phantom_body: PhantomData,
         }
     }
 
     /// Host a new space on this node.
-    pub fn host_space<A>(self) -> Builder<Auth, HostSpace, Body> {
-        Builder {
-            authenticator: self.authenticator,
+    pub fn host_space<A>(self) -> InitializingNode<HostSpace> {
+        InitializingNode {
             uid: self.uid,
+            authenticator: self.authenticator,
+            services: self.services,
             bind_addresses: self.bind_addresses,
             pending_services: self.pending_services,
             method: HostSpace,
-            phantom_body: PhantomData,
         }
     }
 }
 
-impl<Auth, Body> Builder<Auth, ConnectToSpace, Body>
+impl<M> InitializingNode<M>
 where
-    Auth: Authenticator + Send + Sync + Clone + 'static,
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
+    M: Method,
+    M::ServiceDirectory: Clone + Send + Sync + 'static,
+    <M::ServiceDirectory as ServiceDirectory>::Error: std::error::Error,
+    Error: From<<M::ServiceDirectory as ServiceDirectory>::Error>,
 {
-    pub async fn start(self) -> Result<Node<service_directory::Client<Body>, Body>, Error> {
-        let services = Arc::default();
-        let handler = ArcRouterHandler::new(Arc::clone(&services));
-        let server_set =
-            ServerSet::new(handler.clone(), self.authenticator, self.bind_addresses).await?;
-        let session_map = session::Map::new(handler);
-        let session = session_map
-            .get_or_create(
-                service_directory::SERVICE_NAME,
-                [self.method.address.into()],
-                self.method.credentials.unwrap_or_default(),
-            )
+    pub async fn start(self) -> Result<Node<M::ServiceDirectory>> {
+        let services = self.services;
+        let (server_set, mut endpoints_watcher) =
+            server::start_servers(services.clone(), self.authenticator, self.bind_addresses)
+                .await?;
+        let session_store = session::Store::new(services.clone());
+        let service_directory = self.method.create_service_directory(&session_store).await?;
+
+        // Register each service to the directory, and mark them as ready.
+        let server_endpoints = endpoints_to_client_targets(&endpoints_watcher.borrow_and_update());
+        stream::iter(self.pending_services)
+            .map(Ok)
+            .try_for_each_concurrent(None, |(service_name, service_object)| {
+                Self::register_pending_service(
+                    self.uid.clone(),
+                    &services,
+                    &service_directory,
+                    service_name,
+                    service_object,
+                    server_endpoints.clone(),
+                )
+            })
             .await?;
-        let service_directory = service_directory::Client::new(session);
-        let mut node = Node {
+
+        // Update services info to the service directory whenever the server endpoints change.
+
+        task::spawn({
+            let service_directory = service_directory.clone();
+            async move {
+                while let Ok(()) = endpoints_watcher.changed().await {
+                    let server_endpoints =
+                        endpoints_to_client_targets(&endpoints_watcher.borrow_and_update());
+                    stream::iter(services.lock().await.info_mut())
+                        .for_each_concurrent(None, |service_info| async {
+                            service_info.endpoints = server_endpoints.clone();
+                            if let Err(err) = service_directory.update(service_info).await {
+                                warn!(
+                                    error = &err as &dyn std::error::Error,
+                                    "could not update service info to service directory"
+                                )
+                            }
+                        })
+                        .await;
+                }
+            }
+        });
+
+        Ok(Node {
             uid: self.uid,
-            services,
-            session_map,
+            session_store,
             service_directory,
             server_set,
-        };
-        node.init_services(self.pending_services).await?;
-        Ok(node)
+        })
+    }
+
+    async fn register_pending_service<SD>(
+        uid: Uid,
+        services: &service::SharedServices,
+        service_directory: &SD,
+        name: String,
+        object: BoxObject,
+        endpoints: Vec<session::Target>,
+    ) -> Result<()>
+    where
+        SD: ServiceDirectory,
+        Error: From<SD::Error>,
+    {
+        let mut info = service::Info::unregistered(name, endpoints, uid, object.uid());
+        // Registering the service to the directory gets us a service ID, that we can use to
+        // update the local service info. With it, we can also index the service to the
+        // messaging handler so that it can start treating requests for that service.
+        // Consequently, we can notify the service directory of the readiness of the service.
+        let service_id = service_directory.register(&info).await?;
+        info.id = service_id;
+        services.add(info, object).await;
+        service_directory.set_ready(service_id).await?;
+        Ok::<_, Error>(())
     }
 }
 
-impl<Auth, Method, Body> Builder<Auth, Method, Body> {}
-
-impl<Auth, Method, Body> Default for Builder<Auth, Method, Body>
+impl<Method> std::fmt::Debug for InitializingNode<Method>
 where
-    Auth: Default,
-    Method: Default,
-{
-    fn default() -> Self {
-        Self {
-            uid: Default::default(),
-            authenticator: Default::default(),
-            bind_addresses: Default::default(),
-            pending_services: Default::default(),
-            method: Default::default(),
-            phantom_body: Default::default(),
-        }
-    }
-}
-
-impl<Auth, Method, Body> std::fmt::Debug for Builder<Auth, Method, Body>
-where
-    Auth: std::fmt::Debug,
     Method: std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Builder")
             .field("uid", &self.uid)
-            .field("authenticator", &self.authenticator)
             .field("bind_addresses", &self.bind_addresses)
             .field("pending_services", &self.pending_services)
             .field("method", &self.method)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-pub struct Node<SD, Body> {
+#[derive(Debug)]
+pub struct Node<SD> {
     uid: Uid,
-    services: Arc<Mutex<RouterHandler<Body>>>,
-    session_map: session::Map<Body, ArcRouterHandler<Body>>,
+    session_store: session::Store,
     service_directory: SD,
-    server_set: ServerSet,
+    server_set: server::ServerSet,
 }
 
-impl<SD, Body> Node<SD, Body>
-where
-    SD: ServiceDirectory + Clone + Send + 'static,
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
-    async fn init_services(&mut self, pending_services: PendingServiceMap) -> Result<(), Error> {
-        let mut server_endpoints_receiver = self.server_set.endpoints_receiver().clone();
-
-        // Register each service to the directory, and mark them as ready.
-        let server_endpoints =
-            endpoints_to_client_targets(&server_endpoints_receiver.borrow_and_update());
-        stream::iter(pending_services)
-            .map(Ok)
-            .try_for_each_concurrent(None, |(service_name, service_object)| {
-                async {
-                    let mut info = service::Info::process_local(
-                        service_name.clone(),
-                        service::UNSPECIFIED_ID,
-                        server_endpoints.clone(),
-                        self.uid.clone(),
-                        service_object.uid(),
-                    );
-                    // Registering the service to the directory gets us a service ID, that we can use to
-                    // update the local service info. With it, we can also index the service to the
-                    // messaging handler so that it can start treating requests for that service.
-                    // Consequently, we can notify the service directory of the readiness of the service.
-                    let service_id = self.service_directory.register_service(&info).await?;
-                    info.id = service_id;
-                    self.services
-                        .lock()
-                        .await
-                        .insert(service_name, info, service_object);
-                    self.service_directory.service_ready(service_id).await?;
-                    Ok::<_, Error>(())
-                }
-            })
-            .await?;
-
-        let services = Arc::clone(&self.services);
-        let service_directory = self.service_directory.clone();
-        // Update services info to the service directory whenever the server endpoints change.
-        task::spawn(async move {
-            while let Ok(()) = server_endpoints_receiver.changed().await {
-                let server_endpoints =
-                    endpoints_to_client_targets(&server_endpoints_receiver.borrow_and_update());
-                for service_info in services.lock().await.info_mut() {
-                    service_info.endpoints = server_endpoints.clone();
-                    if let Err(_err) = service_directory.update_service_info(&*service_info).await {
-                        // TODO: log the failure
-                    }
-                }
-            }
-        });
-        Ok(())
-    }
-}
-
-impl<SD, Body> Node<SD, Body>
+impl<SD> Node<SD>
 where
     SD: ServiceDirectory,
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
+    Error: From<SD::Error>,
 {
-    pub async fn service(&self, name: &str) -> Result<impl Object + Clone, Error> {
+    pub async fn service(&self, name: &str) -> Result<impl Object + Clone> {
         let service = self.service_directory.service(name).await?;
         let session = self
-            .session_map
+            .session_store
             .get_or_create(
                 name,
                 sort_service_endpoints(&service),
@@ -262,7 +216,7 @@ where
                 Default::default(),
             )
             .await?;
-        let object = object::Proxy::connect(
+        let object = ObjectClient::connect(
             service.id(),
             service::MAIN_OBJECT_ID,
             service.object_uid(),
@@ -274,19 +228,6 @@ where
 
     pub fn service_directory(&self) -> &SD {
         &self.service_directory
-    }
-}
-
-impl<SD, Body> std::fmt::Debug for Node<SD, Body>
-where
-    SD: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AttachedNode")
-            .field("services", &self.services)
-            .field("session_map", &self.session_map)
-            .field("service_directory", &self.service_directory)
-            .finish()
     }
 }
 
@@ -355,11 +296,55 @@ impl std::str::FromStr for Uid {
     }
 }
 
+#[async_trait]
+pub trait Method {
+    type ServiceDirectory: ServiceDirectory;
+
+    async fn create_service_directory(
+        self,
+        store: &session::Store,
+    ) -> Result<Self::ServiceDirectory>;
+}
+
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NotSet;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ConnectToSpace {
     address: Address,
     credentials: Option<KeyDynValueMap>,
 }
 
+#[async_trait]
+impl Method for ConnectToSpace {
+    type ServiceDirectory = service_directory::Client;
+
+    async fn create_service_directory(
+        self,
+        store: &session::Store,
+    ) -> Result<Self::ServiceDirectory> {
+        let session = store
+            .get_or_create(
+                service_directory::SD_SERVICE_NAME,
+                [self.address.into()],
+                self.credentials.unwrap_or_default(),
+            )
+            .await?;
+        Ok(service_directory::Client::new(session))
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostSpace;
+
+#[async_trait]
+impl Method for HostSpace {
+    type ServiceDirectory = Arc<RwLock<service_directory::ServiceInfoMap>>;
+
+    async fn create_service_directory(
+        self,
+        _store: &session::Store,
+    ) -> Result<Self::ServiceDirectory> {
+        Ok(Arc::default())
+    }
+}

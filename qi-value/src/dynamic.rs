@@ -1,8 +1,9 @@
 mod de;
 
-use crate::{reflect::RuntimeReflect, FromValue, IntoValue, Reflect, ToValue, Value};
 pub use self::de::deserialize;
+use crate::{reflect::RuntimeReflect, FromValue, IntoValue, Reflect, ToValue, Value};
 
+// TODO: Check if this is really necessary
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, derive_more::From)]
 pub struct Dynamic<T>(pub T);
 

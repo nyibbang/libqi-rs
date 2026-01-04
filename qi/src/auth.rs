@@ -4,6 +4,25 @@ pub trait Authenticator {
     fn verify(&self, parameters: KeyDynValueMap) -> Result<(), Error>;
 }
 
+impl<T> Authenticator for Box<T>
+where
+    T: Authenticator + ?Sized,
+{
+    fn verify(&self, parameters: KeyDynValueMap) -> Result<(), Error> {
+        (**self).verify(parameters)
+    }
+}
+
+impl<T> Authenticator for std::sync::Arc<T>
+where
+    T: Authenticator + ?Sized,
+{
+    fn verify(&self, parameters: KeyDynValueMap) -> Result<(), Error> {
+        (**self).verify(parameters)
+    }
+}
+
+// TODO: remove this, authenticator is already an optional
 #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PermissiveAuthenticator;
 

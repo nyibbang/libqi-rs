@@ -2,12 +2,12 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::{
     parse::{Parse, ParseStream},
-    AttrStyle, Attribute, Expr, ExprLit, Ident, ItemTrait, Lit, LitStr, Meta, MetaNameValue,
-    Result, TraitItem, TraitItemFn,
+    AttrStyle, Attribute, Expr, ExprLit, ItemTrait, Lit, LitStr, Meta, MetaNameValue, Result,
+    TraitItem, TraitItemFn,
 };
 
 #[derive(Debug)]
-pub(super) struct Object {
+pub(super) struct ObjectTrait {
     trait_item: ItemTrait,
     name: String,
     methods: Vec<Method>,
@@ -16,15 +16,16 @@ pub(super) struct Object {
     description: Vec<LitStr>,
 }
 
-impl ToTokens for Object {
+impl ToTokens for ObjectTrait {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        self.trait_item.to_tokens(tokens)
+        self.trait_item.to_tokens(tokens);
+        // nothing
     }
 }
 
-impl Parse for Object {
+impl Parse for ObjectTrait {
     fn parse(input: ParseStream) -> Result<Self> {
-        let trait_item = ItemTrait::parse(input)?;
+        let mut trait_item = ItemTrait::parse(input)?;
 
         let description = trait_item
             .attrs
@@ -37,7 +38,7 @@ impl Parse for Object {
         let mut signals = Vec::with_capacity(items_len);
         let mut properties = Vec::with_capacity(items_len);
 
-        for item in &trait_item.items {
+        for item in &mut trait_item.items {
             if let Some(method) = Method::from_item(item) {
                 methods.push(method)
             } else if let Some(signal) = Signal::from_item(item) {
@@ -64,23 +65,8 @@ struct Method {
 }
 
 impl Method {
-    fn from_item(item: &TraitItem) -> Option<Self> {
-        let func = match item {
-            TraitItem::Fn(f) => f,
-            _ => return None,
-        };
-
-        if !func
-            .attrs
-            .iter()
-            .any(|attr| is_member_tag_attribute(attr, "method"))
-        {
-            return None;
-        }
-
-        let name = func.sig.ident.clone();
-
-        Some(Self { func: func.clone() })
+    fn from_item(item: &mut TraitItem) -> Option<Self> {
+        trait_fn_item(item, "method").map(|func| Self { func })
     }
 }
 
@@ -90,21 +76,8 @@ struct Signal {
 }
 
 impl Signal {
-    fn from_item(item: &TraitItem) -> Option<Self> {
-        let func = match item {
-            TraitItem::Fn(f) => f,
-            _ => return None,
-        };
-
-        if !func
-            .attrs
-            .iter()
-            .any(|attr| is_member_tag_attribute(attr, "signal"))
-        {
-            return None;
-        }
-
-        Some(Self { func: func.clone() })
+    fn from_item(item: &mut TraitItem) -> Option<Self> {
+        trait_fn_item(item, "signal").map(|func| Self { func })
     }
 }
 
@@ -114,21 +87,8 @@ struct Property {
 }
 
 impl Property {
-    fn from_item(item: &TraitItem) -> Option<Self> {
-        let func = match item {
-            TraitItem::Fn(f) => f,
-            _ => return None,
-        };
-
-        if !func
-            .attrs
-            .iter()
-            .any(|attr| is_member_tag_attribute(attr, "property"))
-        {
-            return None;
-        }
-
-        Some(Self { func: func.clone() })
+    fn from_item(item: &mut TraitItem) -> Option<Self> {
+        trait_fn_item(item, "property").map(|func| Self { func })
     }
 }
 
@@ -150,19 +110,30 @@ fn attribute_outer_doc(attr: &Attribute) -> Option<LitStr> {
     Some(doc_str.clone())
 }
 
+fn trait_fn_item(item: &mut TraitItem, tag: &str) -> Option<TraitItemFn> {
+    let func = match item {
+        TraitItem::Fn(f) => f,
+        _ => return None,
+    };
+
+    let methods_attrs = func
+        .attrs
+        .extract_if(.., |attr| is_member_tag_attribute(attr, tag));
+    if methods_attrs.count() == 0 {
+        return None;
+    }
+
+    Some(func.clone())
+}
+
 fn is_member_tag_attribute(attr: &Attribute, ty: &str) -> bool {
     if attr.style != AttrStyle::Outer {
         return false;
     }
 
-    let path = match &attr.meta {
-        Meta::Path(path) => path,
-        _ => return false,
-    };
-
+    let path = &attr.meta.path();
     if path.segments.len() != 2 {
         return false;
     }
-
     path.segments.iter().map(|seg| &seg.ident).eq(["qi", ty])
 }

@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
         .init();
 
     info!("creating node");
-    let node_builder = qi::node::Builder::new()
+    let node = qi::node::init()
         // You can add services to the node and make them accessible to other nodes of joined spaces.
         .add_service("AudioPlayer", AudioPlayer::new())
         // Host the space on this node
@@ -46,10 +46,10 @@ async fn main() -> Result<()> {
         .host_space();
 
     if let Some(UserAndToken { user, token }) = args.user_and_token {
-        node_builder.with_authenticator(qi::auth::UserTokenAuthenticator::new(user, token));
+        node.with_authenticator(qi::auth::UserTokenAuthenticator::new(user, token));
     }
 
-    let _node = node_builder
+    let _node = node
         .start()
         .await
         .with_context(|| format!("Failed to host space for node at address {}", args.address))?;

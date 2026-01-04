@@ -1,7 +1,5 @@
-use crate::{
-    os, ty, ActionId, FromValue, FromValueError, IntoValue, Map, ObjectId, ServiceId, Signature,
-    Type, Value,
-};
+use crate::{os, ty, FromValue, FromValueError, IntoValue, Map, ServiceId, Signature, Type, Value};
+pub use crate::{ActionId, ObjectId as Id};
 use sha1_smol::Sha1;
 
 #[derive(
@@ -19,7 +17,7 @@ use sha1_smol::Sha1;
 pub struct Object {
     pub meta_object: MetaObject,
     pub service_id: ServiceId,
-    pub object_id: ObjectId,
+    pub object_id: Id,
     pub object_uid: Uid,
 }
 
@@ -142,24 +140,24 @@ impl MetaObject {
         MetaObjectBuilder::new()
     }
 
-    pub fn signal(&self, ident: &MemberIdent) -> Option<&MetaSignal> {
-        match ident {
-            MemberIdent::Id(id) => self.signals.get(id),
-            MemberIdent::Name(name) => self.signals.values().find(|sig| &sig.name == name),
+    pub fn signal(&self, name_or_id: &ActionNameOrId) -> Option<&MetaSignal> {
+        match name_or_id {
+            ActionNameOrId::Id(id) => self.signals.get(id),
+            ActionNameOrId::Name(name) => self.signals.values().find(|sig| &sig.name == name),
         }
     }
 
-    pub fn property(&self, ident: &MemberIdent) -> Option<&MetaProperty> {
-        match ident {
-            MemberIdent::Id(id) => self.properties.get(id),
-            MemberIdent::Name(name) => self.properties.values().find(|prop| &prop.name == name),
+    pub fn property(&self, name_or_id: &ActionNameOrId) -> Option<&MetaProperty> {
+        match name_or_id {
+            ActionNameOrId::Id(id) => self.properties.get(id),
+            ActionNameOrId::Name(name) => self.properties.values().find(|prop| &prop.name == name),
         }
     }
 
-    pub fn method(&self, ident: &MemberIdent) -> Option<&MetaMethod> {
-        match ident {
-            MemberIdent::Id(id) => self.methods.get(id),
-            MemberIdent::Name(name) => self.methods.values().find(|method| &method.name == name),
+    pub fn method(&self, name_or_id: &ActionNameOrId) -> Option<&MetaMethod> {
+        match name_or_id {
+            ActionNameOrId::Id(id) => self.methods.get(id),
+            ActionNameOrId::Name(name) => self.methods.values().find(|method| &method.name == name),
         }
     }
 }
@@ -424,30 +422,30 @@ pub struct MetaProperty {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum MemberIdent {
-    Id(ActionId),
+pub enum ActionNameOrId {
     Name(String),
+    Id(ActionId),
 }
 
-impl From<ActionId> for MemberIdent {
+impl From<ActionId> for ActionNameOrId {
     fn from(value: ActionId) -> Self {
         Self::Id(value)
     }
 }
 
-impl From<String> for MemberIdent {
+impl From<String> for ActionNameOrId {
     fn from(value: String) -> Self {
         Self::Name(value)
     }
 }
 
-impl From<&str> for MemberIdent {
+impl From<&str> for ActionNameOrId {
     fn from(value: &str) -> Self {
         Self::Name(value.to_owned())
     }
 }
 
-impl PartialEq<&str> for MemberIdent {
+impl PartialEq<&str> for ActionNameOrId {
     fn eq(&self, other: &&str) -> bool {
         match self {
             Self::Name(name) => name == other,
@@ -456,7 +454,7 @@ impl PartialEq<&str> for MemberIdent {
     }
 }
 
-impl PartialEq<String> for MemberIdent {
+impl PartialEq<String> for ActionNameOrId {
     fn eq(&self, other: &String) -> bool {
         match self {
             Self::Name(name) => name == other,
@@ -465,7 +463,7 @@ impl PartialEq<String> for MemberIdent {
     }
 }
 
-impl PartialEq<ActionId> for MemberIdent {
+impl PartialEq<ActionId> for ActionNameOrId {
     fn eq(&self, other: &ActionId) -> bool {
         match self {
             Self::Id(id) => id == other,
@@ -474,27 +472,27 @@ impl PartialEq<ActionId> for MemberIdent {
     }
 }
 
-impl std::fmt::Display for MemberIdent {
+impl std::fmt::Display for ActionNameOrId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MemberIdent::Id(id) => id.fmt(f),
-            MemberIdent::Name(name) => name.fmt(f),
+            ActionNameOrId::Id(id) => id.fmt(f),
+            ActionNameOrId::Name(name) => name.fmt(f),
         }
     }
 }
 
-impl<'a> IntoValue<'a> for MemberIdent {
+impl<'a> IntoValue<'a> for ActionNameOrId {
     fn into_value(self) -> Value<'a> {
         match self {
-            MemberIdent::Id(id) => id.into_value(),
-            MemberIdent::Name(name) => name.into_value(),
+            ActionNameOrId::Id(id) => id.into_value(),
+            ActionNameOrId::Name(name) => name.into_value(),
         }
     }
 }
 
-impl<'a> FromValue<'a> for MemberIdent {
+impl<'a> FromValue<'a> for ActionNameOrId {
     fn from_value(value: Value<'a>) -> Result<Self, FromValueError> {
-        // IMPROVE: not ideal to clone the value here.
+        // TODO: IMPROVE: not ideal to clone the value here.
         if let Ok(id) = ActionId::from_value(value.clone()) {
             Ok(Self::Id(id))
         } else if let Ok(name) = String::from_value(value.clone()) {

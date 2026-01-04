@@ -462,7 +462,7 @@ impl DeriveAttributes {
 
 enum ContainerData {
     Empty,
-    Field(Field),
+    Field(Box<Field>),
     Struct { fields: Vec<Field> },
     TupleStruct { fields: Vec<Field> },
 }
@@ -501,7 +501,7 @@ impl ContainerData {
             ));
         }
         Ok(match field_iter.next() {
-            Some(field) => Self::Field(Field::new(field, 0, None)?),
+            Some(field) => Self::Field(Box::new(Field::new(field, 0, None)?)),
             None => Self::Empty,
         })
     }

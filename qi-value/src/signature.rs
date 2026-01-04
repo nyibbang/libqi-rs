@@ -28,12 +28,18 @@ impl Signature {
         Self(None)
     }
 
-    pub fn to_type(&self) -> Option<&Type> {
+    pub fn as_type(&self) -> Option<&Type> {
         self.0.as_ref()
     }
 
     pub fn into_type(self) -> Option<Type> {
         self.0
+    }
+}
+
+impl From<Option<Type>> for Signature {
+    fn from(ty: Option<Type>) -> Self {
+        Self(ty)
     }
 }
 

@@ -43,7 +43,6 @@ pub async fn serve(
     match address {
         Address::Tcp { address, ssl } => {
             if ssl.is_some() {
-                // TODO - handle listening as a SSL/TLS endpoint.
                 unimplemented!("binding to a TCP endpoint with SSL is not yet supported")
             }
             let listener = TcpListener::bind(address).await?;

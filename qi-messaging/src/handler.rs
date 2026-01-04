@@ -4,21 +4,24 @@ use crate::{message, value::KeyDynValueMap};
 use std::{convert::Infallible, future::Future};
 
 pub trait CallHandler {
-    type Error: CallError + Send + 'static;
-    type Future: Future<Output = Result<Bytes, Self::Error>> + Send + 'static;
-    fn handle_call(&self, address: message::Address, args: Bytes) -> Self::Future;
+    type Error: CallError;
+    fn handle_call(
+        &mut self,
+        address: message::Address,
+        args: Bytes,
+    ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send + 'static;
 }
 
 pub trait EventHandler {
-    fn handle_event(&self, address: message::Address, args: Bytes);
+    fn handle_event(&mut self, address: message::Address, args: Bytes);
 }
 
 pub trait PostHandler {
-    fn handle_post(&self, address: message::Address, args: Bytes);
+    fn handle_post(&mut self, address: message::Address, args: Bytes);
 }
 
 pub trait CapabilitiesHandler {
-    fn handle_capabilities(&self, address: message::Address, data: KeyDynValueMap);
+    fn handle_capabilities(&mut self, address: message::Address, map: KeyDynValueMap);
 }
 
 pub trait Handler: CallHandler + EventHandler + PostHandler + CapabilitiesHandler {}

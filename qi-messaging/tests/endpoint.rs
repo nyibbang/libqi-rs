@@ -2,7 +2,7 @@ use assert_matches::assert_matches;
 use bytes::Bytes;
 use futures::{
     channel::mpsc,
-    future::{err, ok, BoxFuture, Ready},
+    future::{err, ok},
     stream, FutureExt, StreamExt,
 };
 use qi_format::{from_slice, to_bytes};
@@ -15,6 +15,7 @@ use qi_messaging::{
 use qi_value::{KeyDynValueMap, Value};
 use std::{
     convert::Infallible,
+    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -597,9 +598,12 @@ impl CountedPendingHandler {
 
 impl CallHandler for &'_ CountedPendingHandler {
     type Error = Infallible;
-    type Future = BoxFuture<'static, Result<Bytes, Self::Error>>;
 
-    fn handle_call(&self, _address: message::Address, _: Bytes) -> Self::Future {
+    fn handle_call(
+        &mut self,
+        _address: message::Address,
+        _: Bytes,
+    ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send + 'static {
         let drop_guard = DecreaseCountDropGuard::new(&self.pending_calls);
         let unblock = Arc::clone(&self.unblock);
         async move {
@@ -612,15 +616,15 @@ impl CallHandler for &'_ CountedPendingHandler {
 }
 
 impl EventHandler for &'_ CountedPendingHandler {
-    fn handle_event(&self, _address: message::Address, _args: Bytes) {}
+    fn handle_event(&mut self, _address: message::Address, _args: Bytes) {}
 }
 
 impl PostHandler for &'_ CountedPendingHandler {
-    fn handle_post(&self, _address: message::Address, _args: Bytes) {}
+    fn handle_post(&mut self, _address: message::Address, _args: Bytes) {}
 }
 
 impl CapabilitiesHandler for &'_ CountedPendingHandler {
-    fn handle_capabilities(&self, _address: message::Address, _data: KeyDynValueMap) {}
+    fn handle_capabilities(&mut self, _address: message::Address, _data: KeyDynValueMap) {}
 }
 
 struct DecreaseCountDropGuard(Arc<AtomicUsize>);
@@ -667,9 +671,12 @@ impl SimpleHandler {
 
 impl CallHandler for SimpleHandler {
     type Error = HandlerError;
-    type Future = Ready<Result<Bytes, Self::Error>>;
 
-    fn handle_call(&self, _address: message::Address, args: Bytes) -> Self::Future {
+    fn handle_call(
+        &mut self,
+        _address: message::Address,
+        args: Bytes,
+    ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send + 'static {
         let arg = from_slice::<HandlerValue>(&args).unwrap();
         match arg {
             Ok(arg) => ok(to_bytes(&arg).unwrap()),
@@ -679,19 +686,19 @@ impl CallHandler for SimpleHandler {
 }
 
 impl EventHandler for SimpleHandler {
-    fn handle_event(&self, address: message::Address, args: Bytes) {
+    fn handle_event(&mut self, address: message::Address, args: Bytes) {
         self.events.unbounded_send((address, args)).unwrap()
     }
 }
 
 impl PostHandler for SimpleHandler {
-    fn handle_post(&self, address: message::Address, args: Bytes) {
+    fn handle_post(&mut self, address: message::Address, args: Bytes) {
         self.posts.unbounded_send((address, args)).unwrap()
     }
 }
 
 impl CapabilitiesHandler for SimpleHandler {
-    fn handle_capabilities(&self, address: message::Address, map: KeyDynValueMap) {
+    fn handle_capabilities(&mut self, address: message::Address, map: KeyDynValueMap) {
         self.capabilities.unbounded_send((address, map)).unwrap()
     }
 }

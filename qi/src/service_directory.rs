@@ -1,35 +1,241 @@
 use crate::{
-    error::Error,
-    messaging,
-    object::{self, Object, ObjectExt},
+    object::{self, Object, ObjectExt, SignalClient},
     service, session,
     value::{
         object::{MetaMethod, MetaObject},
-        ActionId, Reflect, ServiceId, Value,
+        os, ActionId, Reflect, Value,
     },
+    BasicSignal, Signal,
 };
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
+use qi_value::object::MetaSignal;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
-pub(super) const SERVICE_NAME: &str = "ServiceDirectory";
-const SERVICE_ID: ServiceId = ServiceId(1);
+pub(super) const SD_SERVICE_NAME: &str = "ServiceDirectory";
+const SD_SERVICE_ID: service::Id = service::Id(1);
 
+#[qi_macros::object]
 #[async_trait]
-pub trait ServiceDirectory: Object {
-    async fn services(&self) -> Result<Vec<service::Info>, Error>;
-    async fn service(&self, name: &str) -> Result<service::Info, Error>;
-    async fn register_service(&self, info: &service::Info) -> Result<ServiceId, Error>;
-    async fn unregister_service(&self, id: ServiceId) -> Result<(), Error>;
-    async fn service_ready(&self, id: ServiceId) -> Result<(), Error>;
-    async fn update_service_info(&self, info: &service::Info) -> Result<(), Error>;
+pub trait ServiceDirectory {
+    type Error;
+    type ServiceAdded: Signal<Value = (service::Id, String)>;
+    type ServiceRemoved: Signal<Value = (service::Id, String)>;
+
+    #[qi::method]
+    async fn services(&self) -> Result<Vec<service::Info>, Self::Error>;
+
+    #[qi::method]
+    async fn service(&self, name: &str) -> Result<service::Info, Self::Error>;
+
+    #[qi::method(name = "registerService")]
+    async fn register(&self, info: &service::Info) -> Result<service::Id, Self::Error>;
+
+    #[qi::method(name = "unregisterService")]
+    async fn unregister(&self, id: service::Id) -> Result<(), Self::Error>;
+
+    #[qi::method(name = "serviceReady")]
+    async fn set_ready(&self, id: service::Id) -> Result<(), Self::Error>;
+
+    #[qi::method(name = "updateServiceInfo")]
+    async fn update(&self, info: &service::Info) -> Result<(), Self::Error>;
+
+    #[qi::signal(name = "serviceAdded")]
+    fn service_added(&self) -> Self::ServiceAdded;
+
+    #[qi::signal(name = "serviceRemoved")]
+    fn service_removed(&self) -> Self::ServiceRemoved;
+
+    #[qi::method(name = "machineId")]
+    async fn machine_id(&self) -> Result<os::MachineId, Self::Error>;
 }
 
-pub struct Client<Body>(object::Proxy<Body>);
+#[async_trait]
+impl<T> ServiceDirectory for Arc<T>
+where
+    T: ServiceDirectory + Send + Sync,
+{
+    type Error = T::Error;
+    type ServiceAdded = T::ServiceAdded;
+    type ServiceRemoved = T::ServiceRemoved;
 
-impl<Body> Client<Body> {
-    pub(super) fn new(session: session::Session<Body>) -> Self {
-        Self(object::Proxy::new(
-            SERVICE_ID,
+    async fn services(&self) -> Result<Vec<service::Info>, Self::Error> {
+        (**self).services().await
+    }
+
+    async fn service(&self, name: &str) -> Result<service::Info, Self::Error> {
+        (**self).service(name).await
+    }
+
+    async fn register(&self, info: &service::Info) -> Result<service::Id, Self::Error> {
+        (**self).register(info).await
+    }
+
+    async fn unregister(&self, id: service::Id) -> Result<(), Self::Error> {
+        (**self).unregister(id).await
+    }
+
+    async fn set_ready(&self, id: service::Id) -> Result<(), Self::Error> {
+        (**self).set_ready(id).await
+    }
+
+    async fn update(&self, info: &service::Info) -> Result<(), Self::Error> {
+        (**self).update(info).await
+    }
+
+    fn service_added(&self) -> Self::ServiceAdded {
+        (**self).service_added()
+    }
+
+    fn service_removed(&self) -> Self::ServiceRemoved {
+        (**self).service_removed()
+    }
+
+    async fn machine_id(&self) -> Result<os::MachineId, Self::Error> {
+        (**self).machine_id().await
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct ServiceInfoMap {
+    pending_services: HashMap<service::Id, service::Info>,
+    services: HashMap<service::Id, service::Info>,
+    service_id_iter: ServiceIdIterator,
+    added: Arc<BasicSignal<(service::Id, String)>>,
+    removed: Arc<BasicSignal<(service::Id, String)>>,
+}
+
+impl ServiceInfoMap {
+    fn has_service(&self, name: &str) -> bool {
+        self.pending_services
+            .values()
+            .chain(self.pending_services.values())
+            .any(|info| info.name == name)
+    }
+}
+
+#[async_trait]
+impl ServiceDirectory for RwLock<ServiceInfoMap> {
+    type Error = Error;
+    type ServiceAdded = Arc<BasicSignal<(service::Id, String)>>;
+    type ServiceRemoved = Arc<BasicSignal<(service::Id, String)>>;
+
+    async fn services(&self) -> Result<Vec<service::Info>, Self::Error> {
+        Ok(read(self).services.values().cloned().collect())
+    }
+
+    async fn service(&self, name: &str) -> Result<service::Info, Self::Error> {
+        read(self)
+            .services
+            .values()
+            .find(|info| info.name == name)
+            .cloned()
+            .ok_or_else(|| Error::ServiceNotFound(name.to_owned()))
+    }
+
+    async fn register(&self, info: &service::Info) -> Result<service::Id, Self::Error> {
+        let mut this = write(self);
+        if this.has_service(&info.name) {
+            return Err(Error::ServiceAlreadyExists(info.name.clone()));
+        }
+        let id = this.service_id_iter.next().ok_or(Error::MaxIdReached)?;
+
+        this.pending_services
+            .insert(id, service::Info { id, ..info.clone() });
+        Ok(id)
+    }
+
+    async fn unregister(&self, id: service::Id) -> Result<(), Self::Error> {
+        write(self).services.remove(&id);
+        Ok(())
+    }
+
+    async fn set_ready(&self, id: service::Id) -> Result<(), Self::Error> {
+        let mut this = write(self);
+        let service = this.pending_services.remove(&id);
+        match service {
+            Some(service) => {
+                this.services.insert(id, service);
+                Ok(())
+            }
+            None => Err(Error::PendingServiceNotFound(id)),
+        }
+    }
+
+    async fn update(&self, info: &service::Info) -> Result<(), Self::Error> {
+        let mut this = write(self);
+        match this.services.get_mut(&info.id) {
+            Some(service_info) => *service_info = info.clone(),
+            None => match this.pending_services.get_mut(&info.id) {
+                Some(service_info) => *service_info = info.clone(),
+                None => {
+                    return Err(Error::ServiceWithIdNotFound(info.id));
+                }
+            },
+        };
+        Ok(())
+    }
+
+    fn service_added(&self) -> Self::ServiceAdded {
+        Arc::clone(&read(self).added)
+    }
+
+    fn service_removed(&self) -> Self::ServiceRemoved {
+        Arc::clone(&read(self).removed)
+    }
+
+    async fn machine_id(&self) -> Result<os::MachineId, Self::Error> {
+        Ok(os::MachineId::local())
+    }
+}
+
+fn read(this: &RwLock<ServiceInfoMap>) -> std::sync::RwLockReadGuard<'_, ServiceInfoMap> {
+    this.read().unwrap_or_else(|err| {
+        this.clear_poison();
+        err.into_inner()
+    })
+}
+
+fn write(this: &RwLock<ServiceInfoMap>) -> std::sync::RwLockWriteGuard<'_, ServiceInfoMap> {
+    this.write().unwrap_or_else(|err| {
+        this.clear_poison();
+        err.into_inner()
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("service \"{0}\" not found")]
+    ServiceNotFound(String),
+
+    #[error("service with id \"{0}\" not found")]
+    ServiceWithIdNotFound(service::Id),
+
+    #[error("service \"{0}\" already exists")]
+    ServiceAlreadyExists(String),
+
+    #[error("maximum service id has been reached, cannot register any more service")]
+    MaxIdReached,
+
+    #[error("there is no pending service with id {0}")]
+    PendingServiceNotFound(service::Id),
+}
+
+impl From<Error> for crate::Error {
+    fn from(error: Error) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+pub struct Client(object::ObjectClient);
+
+impl Client {
+    pub(super) fn new(session: session::Session) -> Self {
+        Self(object::ObjectClient::new(
+            SD_SERVICE_ID,
             service::MAIN_OBJECT_ID,
             object::Uid::default(),
             Meta::get().object.clone(),
@@ -38,41 +244,37 @@ impl<Body> Client<Body> {
     }
 }
 
-impl<Body> Clone for Client<Body> {
+impl Clone for Client {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<Body> std::fmt::Debug for Client<Body> {
+impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Client").field(&self.0).finish()
     }
 }
 
 #[async_trait]
-impl<Body> Object for Client<Body>
-where
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
+impl Object for Client {
     fn meta(&self) -> &MetaObject {
         self.0.meta()
     }
 
     async fn meta_call(
         &self,
-        ident: object::MemberIdent,
+        ident: object::ActionNameOrId,
         args: Value<'_>,
-    ) -> Result<Value<'static>, Error> {
+    ) -> Result<Value<'static>, crate::Error> {
         self.0.meta_call(ident, args).await
     }
 
-    async fn meta_post(&self, ident: object::MemberIdent, value: Value<'_>) {
+    async fn meta_post(&self, ident: object::ActionNameOrId, value: Value<'_>) {
         self.0.meta_post(ident, value).await
     }
 
-    async fn meta_event(&self, ident: object::MemberIdent, value: Value<'_>) {
+    async fn meta_event(&self, ident: object::ActionNameOrId, value: Value<'_>) {
         self.0.meta_event(ident, value).await
     }
 
@@ -82,33 +284,45 @@ where
 }
 
 #[async_trait]
-impl<Body> ServiceDirectory for Client<Body>
-where
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
-    async fn services(&self) -> Result<Vec<service::Info>, Error> {
+impl ServiceDirectory for Client {
+    type Error = crate::Error;
+    type ServiceAdded = object::SignalClient<(service::Id, String)>;
+    type ServiceRemoved = object::SignalClient<(service::Id, String)>;
+
+    async fn services(&self) -> Result<Vec<service::Info>, Self::Error> {
         self.0.call(Meta::get().services, ()).await
     }
 
-    async fn service(&self, name: &str) -> Result<service::Info, Error> {
+    async fn service(&self, name: &str) -> Result<service::Info, Self::Error> {
         self.0.call(Meta::get().service, name).await
     }
 
-    async fn register_service(&self, info: &service::Info) -> Result<ServiceId, Error> {
+    async fn register(&self, info: &service::Info) -> Result<service::Id, Self::Error> {
         self.0.call(Meta::get().register_service, info).await
     }
 
-    async fn unregister_service(&self, id: ServiceId) -> Result<(), Error> {
+    async fn unregister(&self, id: service::Id) -> Result<(), Self::Error> {
         self.0.call(Meta::get().unregister_service, id).await
     }
 
-    async fn service_ready(&self, id: ServiceId) -> Result<(), Error> {
+    async fn set_ready(&self, id: service::Id) -> Result<(), Self::Error> {
         self.0.call(Meta::get().service_ready, id).await
     }
 
-    async fn update_service_info(&self, info: &service::Info) -> Result<(), Error> {
+    async fn update(&self, info: &service::Info) -> Result<(), Self::Error> {
         self.0.call(Meta::get().update_service_info, info).await
+    }
+
+    fn service_added(&self) -> Self::ServiceAdded {
+        SignalClient::new(self.0.clone(), Meta::get().service_added)
+    }
+
+    fn service_removed(&self) -> Self::ServiceRemoved {
+        SignalClient::new(self.0.clone(), Meta::get().service_removed)
+    }
+
+    async fn machine_id(&self) -> Result<os::MachineId, Self::Error> {
+        self.0.call(Meta::get().machine_id, ()).await
     }
 }
 
@@ -121,6 +335,9 @@ struct Meta {
     unregister_service: ActionId,
     service_ready: ActionId,
     update_service_info: ActionId,
+    service_added: ActionId,
+    service_removed: ActionId,
+    machine_id: ActionId,
 }
 
 impl Meta {
@@ -132,11 +349,14 @@ impl Meta {
             let unregister_service;
             let service_ready;
             let update_service_info;
-            let mut method_id = object::ACTION_START_ID;
+            let service_added;
+            let service_removed;
+            let machine_id;
+            let mut action_id = object::ACTION_START_ID;
             let mut builder = MetaObject::builder();
             // Method: service
             builder.add_method({
-                service = method_id.next().unwrap();
+                service = action_id.next().unwrap();
                 let mut builder = MetaMethod::builder(service);
                 builder.set_name("service");
                 builder.parameter(0).set_type(<&str>::ty());
@@ -145,7 +365,7 @@ impl Meta {
             });
             // Method: services
             builder.add_method({
-                services = method_id.next().unwrap();
+                services = action_id.next().unwrap();
                 let mut builder = MetaMethod::builder(services);
                 builder.set_name("services");
                 builder.return_value().set_type(Vec::<service::Info>::ty());
@@ -153,35 +373,61 @@ impl Meta {
             });
             // Method: register_service
             builder.add_method({
-                register_service = method_id.next().unwrap();
+                register_service = action_id.next().unwrap();
                 let mut builder = MetaMethod::builder(register_service);
                 builder.set_name("registerService");
                 builder.parameter(0).set_type(service::Info::ty());
-                builder.return_value().set_type(ServiceId::ty());
+                builder.return_value().set_type(service::Id::ty());
                 builder.build()
             });
             // Method: unregister_service
             builder.add_method({
-                unregister_service = method_id.next().unwrap();
+                unregister_service = action_id.next().unwrap();
                 let mut builder = MetaMethod::builder(unregister_service);
                 builder.set_name("unregisterService");
-                builder.parameter(0).set_type(ServiceId::ty());
+                builder.parameter(0).set_type(service::Id::ty());
                 builder.build()
             });
             // Method: service_ready
             builder.add_method({
-                service_ready = method_id.next().unwrap();
+                service_ready = action_id.next().unwrap();
                 let mut builder = MetaMethod::builder(service_ready);
                 builder.set_name("serviceReady");
-                builder.parameter(0).set_type(ServiceId::ty());
+                builder.parameter(0).set_type(service::Id::ty());
                 builder.build()
             });
             // Method: update_service_info
             builder.add_method({
-                update_service_info = method_id.next().unwrap();
+                update_service_info = action_id.next().unwrap();
                 let mut builder = MetaMethod::builder(update_service_info);
                 builder.set_name("updateServiceInfo");
                 builder.parameter(0).set_type(service::Info::ty());
+                builder.build()
+            });
+            // Signal: service_added
+            builder.add_signal({
+                service_added = action_id.next().unwrap();
+                MetaSignal {
+                    uid: service_added,
+                    name: "serviceAdded".to_owned(),
+                    signature: <(service::Id, String)>::ty().into(),
+                }
+            });
+            // Signal: service_removed
+            builder.add_signal({
+                service_removed = action_id.next().unwrap();
+                MetaSignal {
+                    uid: service_removed,
+                    name: "serviceRemoved".to_owned(),
+                    signature: <(service::Id, String)>::ty().into(),
+                }
+            });
+            // Method: machine_id
+            builder.add_method({
+                machine_id = action_id.next().unwrap();
+                let mut builder = MetaMethod::builder(machine_id);
+                builder.set_name("machineId");
+                builder.return_value().set_type(os::MachineId::ty());
                 builder.build()
             });
             let object = builder.build();
@@ -193,6 +439,9 @@ impl Meta {
                 unregister_service,
                 service_ready,
                 update_service_info,
+                service_added,
+                service_removed,
+                machine_id,
             }
             // service = { id = 100, text = "get a service (method: service)" },
             // services = { id = 101, text = "get all services (method: services)" },
@@ -205,5 +454,28 @@ impl Meta {
             // machine_id = { id = 108, text = "get the machine id (method: machineId)" },
         });
         &META
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ServiceIdIterator {
+    current: u32,
+}
+
+impl Default for ServiceIdIterator {
+    fn default() -> Self {
+        Self {
+            current: SD_SERVICE_ID.0 + 1,
+        }
+    }
+}
+
+impl Iterator for ServiceIdIterator {
+    type Item = service::Id;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.current;
+        self.current = self.current.checked_add(1)?;
+        Some(service::Id(current))
     }
 }

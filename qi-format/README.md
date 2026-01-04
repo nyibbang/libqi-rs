@@ -6,7 +6,3 @@ the `qi` format.
 
 The `qi` format is a binary representation of values. It is mainly used for
 communicating values in the `qi` messaging protocol.
-
-## Minimum Rust Required Version (MSRV)
-
-This crate requires Rust 1.68+.

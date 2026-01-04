@@ -1,5 +1,6 @@
 use crate::{
     messaging::{self, Address},
+    service,
     session::{self, target::Kind, Session, WeakSession},
     Error,
 };
@@ -7,30 +8,29 @@ use qi_value::KeyDynValueMap;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
-use super::HandlerError;
-
-/// A session map that handles session targets and keeps track of existing
+/// A session store that handles session targets and keeps track of existing
 /// sessions to a space services.
 ///
 /// It creates new sessions that are associated with services and register them
 /// for further retrieval, enabling usage of service session targets.
-pub(crate) struct Map<Body, Handler> {
-    handler: Handler,
+#[derive(Debug)]
+pub struct Store {
+    services: service::SharedServices,
 
     /// The list of existing sessions with the associated service name.
-    sessions: Arc<Mutex<HashMap<String, WeakSession<Body>>>>,
+    sessions: Arc<Mutex<HashMap<String, WeakSession>>>,
 }
 
-impl<Body, Handler> Map<Body, Handler> {
-    pub(crate) fn new(handler: Handler) -> Self {
+impl Store {
+    pub(crate) fn new(services: service::SharedServices) -> Self {
         let sessions = Default::default();
         Self {
-            handler,
+            services,
             sessions: Arc::clone(&sessions),
         }
     }
 
-    async fn get(&self, name: &str) -> Option<Session<Body>> {
+    async fn get(&self, name: &str) -> Option<Session> {
         let mut sessions = self.sessions.lock().await;
         match sessions.get(name) {
             Some(weak) => {
@@ -43,14 +43,7 @@ impl<Body, Handler> Map<Body, Handler> {
             None => None,
         }
     }
-}
 
-impl<Body, Handler> Map<Body, Handler>
-where
-    Handler: messaging::Handler<Body, Error = HandlerError> + Clone + Send + Sync + 'static,
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
     /// Gets a session to the given targets, using the service name to store
     /// any created session for further retrieval.
     pub(crate) async fn get_or_create<Targets>(
@@ -58,7 +51,7 @@ where
         service_name: &str,
         targets: Targets,
         credentials: KeyDynValueMap,
-    ) -> Result<Session<Body>, Error>
+    ) -> Result<Session, Error>
     where
         for<'t> &'t Targets: IntoIterator<Item = &'t session::Target>,
     {
@@ -99,28 +92,21 @@ where
         service_name: &str,
         address: messaging::Address,
         credentials: KeyDynValueMap,
-    ) -> Result<Session<Body>, Error> {
+    ) -> Result<Session, Error> {
         let (messages_in, messages_out) = messaging::channel::connect(address).await?;
-        let session =
-            Session::connect(messages_in, messages_out, credentials, self.handler.clone()).await?;
+        let session = Session::connect(
+            messages_in,
+            messages_out,
+            credentials,
+            self.services.clone(),
+        )
+        .await?;
         let service_name = service_name.to_owned();
         self.sessions
             .lock()
             .await
             .insert(service_name.clone(), session.downgrade());
         Ok(session)
-    }
-}
-
-impl<Body, Handler> std::fmt::Debug for Map<Body, Handler>
-where
-    Handler: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Map")
-            .field("handler", &self.handler)
-            .field("sessions", &self.sessions)
-            .finish()
     }
 }
 

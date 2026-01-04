@@ -1,15 +1,16 @@
-pub use crate::value::ObjectId as Id;
+pub use crate::value::object::*;
 use crate::{
-    error::{FormatError, ValueConversionError},
-    messaging::{self, message},
+    error::ValueConversionError,
+    messaging::message,
     session::Session,
-    value::{self, ActionId, Dynamic, FromValue, IntoValue, ServiceId, Value},
-    Error,
+    signal,
+    value::{self, Dynamic, FromValue, IntoValue, ServiceId, Value},
+    Error, Result, Signal,
 };
 use async_trait::async_trait;
 use sealed::sealed;
-use tracing::{info, warn};
-pub use value::object::{Uid, *};
+use std::marker::PhantomData;
+use tracing::warn;
 
 // const ACTION_ID_REGISTER_EVENT: ActionId = ActionId(0);
 // const ACTION_ID_UNREGISTER_EVENT: ActionId = ActionId(1);
@@ -59,12 +60,15 @@ where
 pub trait Object {
     fn meta(&self) -> &MetaObject;
 
-    async fn meta_call(&self, ident: MemberIdent, args: Value<'_>)
-        -> Result<Value<'static>, Error>;
+    async fn meta_call(
+        &self,
+        name_or_id: ActionNameOrId,
+        args: Value<'_>,
+    ) -> Result<Value<'static>>;
 
-    async fn meta_post(&self, ident: MemberIdent, value: Value<'_>);
+    async fn meta_post(&self, name_or_id: ActionNameOrId, value: Value<'_>);
 
-    async fn meta_event(&self, ident: MemberIdent, value: Value<'_>);
+    async fn meta_event(&self, name_or_id: ActionNameOrId, value: Value<'_>);
 
     fn uid(&self) -> Uid {
         Uid::from_ptr(self)
@@ -74,40 +78,41 @@ pub trait Object {
 #[sealed]
 #[async_trait]
 pub trait ObjectExt: Object {
-    async fn call<'a, R, Ident, T>(&self, ident: Ident, args: T) -> Result<R, Error>
+    async fn call<'a, R, Id, T>(&self, name_or_id: Id, args: T) -> Result<R>
     where
-        Ident: Into<MemberIdent> + Send,
+        Id: Into<ActionNameOrId> + Send,
         T: IntoValue<'a> + Send,
         R: FromValue<'static>,
     {
         Ok(self
-            .meta_call(ident.into(), args.into_value())
+            .meta_call(name_or_id.into(), args.into_value())
             .await?
             .cast_into()
             .map_err(ValueConversionError::MethodReturnValue)?)
     }
 
-    async fn property<Ident, R>(&self, ident: Ident) -> Result<R, Error>
+    async fn property<Id, R>(&self, name_or_id: Id) -> Result<R>
     where
-        Ident: Into<MemberIdent> + Send,
+        Id: Into<ActionNameOrId> + Send,
         R: for<'r> FromValue<'r>,
     {
-        self.call(ACTION_ID_PROPERTY, Dynamic(ident.into())).await
+        self.call(ACTION_ID_PROPERTY, Dynamic(name_or_id.into()))
+            .await
     }
 
-    async fn set_property<Ident, T>(&self, ident: Ident, value: T) -> Result<(), Error>
+    async fn set_property<Id, T>(&self, name_or_id: Id, value: T) -> Result<()>
     where
-        Ident: Into<MemberIdent> + Send,
+        Id: Into<ActionNameOrId> + Send,
         T: for<'t> IntoValue<'t> + Send,
     {
         self.call(
             ACTION_ID_SET_PROPERTY,
-            (Dynamic(ident.into()), Dynamic(value)),
+            (Dynamic(name_or_id.into()), Dynamic(value)),
         )
         .await
     }
 
-    async fn properties(&self) -> Result<Vec<String>, Error> {
+    async fn properties(&self) -> Result<Vec<String>> {
         Ok(self
             .meta()
             .properties
@@ -121,21 +126,22 @@ pub trait ObjectExt: Object {
 #[async_trait]
 impl<O> ObjectExt for O where O: Object + Sync + ?Sized {}
 
-pub struct Proxy<Body> {
+#[derive(Debug, Clone)]
+pub struct ObjectClient {
     service_id: ServiceId,
     id: Id,
     uid: Uid,
     meta: MetaObject,
-    session: Session<Body>,
+    session: Session,
 }
 
-impl<Body> Proxy<Body> {
+impl ObjectClient {
     pub(super) fn new(
         service_id: ServiceId,
         id: Id,
         uid: Uid,
         meta: MetaObject,
-        session: Session<Body>,
+        session: Session,
     ) -> Self {
         Self {
             service_id,
@@ -147,17 +153,13 @@ impl<Body> Proxy<Body> {
     }
 }
 
-impl<Body> Proxy<Body>
-where
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
+impl ObjectClient {
     pub(super) async fn connect(
         service_id: ServiceId,
         id: Id,
         uid: Uid,
-        session: Session<Body>,
-    ) -> Result<Self, Error> {
+        session: Session,
+    ) -> Result<Self> {
         let meta = Self::fetch_meta_object(&session, service_id, id).await?;
         Ok(Self {
             service_id,
@@ -169,10 +171,10 @@ where
     }
 
     async fn fetch_meta_object(
-        session: &Session<Body>,
+        session: &Session,
         service_id: ServiceId,
         id: Id,
-    ) -> Result<MetaObject, Error> {
+    ) -> Result<MetaObject> {
         Ok(session
             .call(
                 message::Address(service_id, id, ACTION_ID_METAOBJECT),
@@ -187,64 +189,36 @@ where
     }
 }
 
-impl<Body> Clone for Proxy<Body> {
-    fn clone(&self) -> Self {
-        Self {
-            service_id: self.service_id,
-            id: self.id,
-            uid: self.uid,
-            meta: self.meta.clone(),
-            session: self.session.clone(),
-        }
-    }
-}
-
-impl<Body> std::fmt::Debug for Proxy<Body> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Proxy")
-            .field("service_id", &self.service_id)
-            .field("id", &self.id)
-            .field("uid", &self.uid)
-            .field("meta", &self.meta)
-            .field("session", &self.session)
-            .finish()
-    }
-}
-
 #[async_trait]
-impl<Body> Object for Proxy<Body>
-where
-    Body: messaging::Body + Send + 'static,
-    Body::Error: Send + Sync + 'static,
-{
+impl Object for ObjectClient {
     fn meta(&self) -> &MetaObject {
         &self.meta
     }
 
     async fn meta_call(
         &self,
-        ident: MemberIdent,
+        name_or_id: ActionNameOrId,
         args: Value<'_>,
-    ) -> Result<Value<'static>, Error> {
+    ) -> Result<Value<'static>> {
         let method = self
             .meta
-            .method(&ident)
-            .ok_or_else(|| Error::MethodNotFound(ident))?;
+            .method(&name_or_id)
+            .ok_or_else(|| Error::MethodNotFound(name_or_id))?;
         self.session
             .call(
                 message::Address(self.service_id, self.id, method.uid),
                 args,
-                method.return_signature.to_type(),
+                method.return_signature.as_type(),
             )
             .await
     }
 
-    async fn meta_post(&self, ident: MemberIdent, args: Value<'_>) {
-        let target = match PostTarget::get(&self.meta, &ident) {
+    async fn meta_post(&self, name_or_id: ActionNameOrId, args: Value<'_>) {
+        let target = match PostAction::get(&self.meta, &name_or_id) {
             Some(target) => target,
             None => {
                 warn!(
-                    member = %ident,
+                    member = %name_or_id,
                     "post request error: target not found"
                 );
                 return;
@@ -252,9 +226,9 @@ where
         };
         if let Err(err) = self
             .session
-            .fire_and_forget(
+            .post(
                 message::Address(self.service_id, self.id, target.action_id()),
-                message::FireAndForget::Post(args),
+                args,
             )
             .await
         {
@@ -265,12 +239,12 @@ where
         }
     }
 
-    async fn meta_event(&self, ident: MemberIdent, value: Value<'_>) {
-        let signal = match self.meta.signal(&ident) {
+    async fn meta_event(&self, name_or_id: ActionNameOrId, value: Value<'_>) {
+        let signal = match self.meta.signal(&name_or_id) {
             Some(signal) => signal,
             None => {
                 warn!(
-                    member = %ident,
+                    member = %name_or_id,
                     "event request error: signal not found"
                 );
                 return;
@@ -278,9 +252,9 @@ where
         };
         if let Err(err) = self
             .session
-            .fire_and_forget(
+            .send_event(
                 message::Address(self.service_id, self.id, signal.uid),
-                message::FireAndForget::Event(value),
+                value,
             )
             .await
         {
@@ -296,119 +270,78 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SignalClient<T> {
+    object: ObjectClient,
+    id: ActionId,
+    ph: PhantomData<T>,
+}
+
+impl<T> SignalClient<T> {
+    pub(crate) fn new(object: ObjectClient, id: ActionId) -> Self {
+        Self {
+            object,
+            id,
+            ph: PhantomData,
+        }
+    }
+}
+
+impl<T> Signal for SignalClient<T> {
+    type Value = T;
+    type Connection = SignalClientConnection;
+
+    fn connect<F>(&self, f: F) -> Self::Connection
+    where
+        F: FnMut(Self::Value) + Send + Sync + 'static,
+    {
+        todo!()
+    }
+}
+
+pub struct SignalClientConnection {
+    object: ObjectClient,
+    link: Option<signal::Link>,
+}
+
+impl signal::Connection for SignalClientConnection {
+    fn detach(mut self) -> Option<signal::Link> {
+        self.link.take()
+    }
+}
+
+impl Drop for SignalClientConnection {
+    fn drop(&mut self) {
+        todo!()
+    }
+}
+
 #[derive(Debug)]
-enum PostTarget<'a> {
+pub(crate) enum PostAction<'a> {
     Method(&'a MetaMethod),
     Signal(&'a MetaSignal),
 }
 
-impl<'a> PostTarget<'a> {
-    fn get(meta: &'a MetaObject, ident: &MemberIdent) -> Option<Self> {
-        meta.method(ident)
+impl<'a> PostAction<'a> {
+    pub(crate) fn get(meta: &'a MetaObject, name_or_id: &ActionNameOrId) -> Option<Self> {
+        meta.method(name_or_id)
             .map(Self::Method)
-            .or_else(|| meta.signal(ident).map(Self::Signal))
+            .or_else(|| meta.signal(name_or_id).map(Self::Signal))
     }
 
     fn action_id(&self) -> ActionId {
         match self {
-            PostTarget::Method(method) => method.uid,
-            PostTarget::Signal(signal) => signal.uid,
+            PostAction::Method(method) => method.uid,
+            PostAction::Signal(signal) => signal.uid,
         }
     }
 
-    fn parameters_signature(&self) -> &value::Signature {
+    pub(crate) fn parameters_signature(&self) -> &value::Signature {
         match self {
-            PostTarget::Method(method) => &method.parameters_signature,
-            PostTarget::Signal(signal) => &signal.signature,
+            PostAction::Method(method) => &method.parameters_signature,
+            PostAction::Signal(signal) => &signal.signature,
         }
     }
-}
-
-/// An messaging handler-like interface for object, but not exactly one. Messaging handlers take
-/// messaging address as parameter, while this interface only takes action identifiers (so without the
-/// service and object identifiers in messaging addresses).
-#[async_trait]
-pub(super) trait HandlerExt<Body>: Object
-where
-    Body: messaging::Body + Send,
-    Body::Error: std::error::Error + Send + Sync + 'static,
-{
-    async fn handler_meta_call<'a>(&'a self, action: ActionId, args: Body) -> Result<Body, Error>
-    where
-        Body: 'a,
-    {
-        // Get the targeted method so that we can get the expected parameters type and know what
-        // type of value we're supposed to deserialize.
-        let action_ident = MemberIdent::Id(action);
-        let method = self
-            .meta()
-            .method(&action_ident)
-            .ok_or_else(|| Error::MethodNotFound(action_ident.clone()))?;
-        let args = args
-            .deserialize_seed(value::de::ValueType(method.parameters_signature.to_type()))
-            .map_err(FormatError::ArgumentsDeserialization)?;
-        let reply = self.meta_call(action_ident, args).await?;
-        Ok(Body::serialize(&reply).map_err(FormatError::MethodReturnValueSerialization)?)
-    }
-
-    async fn handler_meta_post<'a>(&'a self, action: ActionId, args: Body)
-    where
-        Body: 'a,
-    {
-        // Same as for "call", we need to know the type of parameters to know what to deserialize.
-        let action_ident = MemberIdent::Id(action);
-        let target = match PostTarget::get(self.meta(), &action_ident) {
-            Some(target) => target,
-            None => {
-                info!(
-                    target = %action_ident,
-                    "post request discarded: action target not found"
-                );
-                return;
-            }
-        };
-        match args.deserialize_seed(value::de::ValueType(
-            target.parameters_signature().to_type(),
-        )) {
-            Ok(args) => self.meta_post(action_ident, args).await,
-            Err(err) => info!(
-                error = &err as &dyn std::error::Error,
-                "post request discarded: failed to deserialize arguments"
-            ),
-        };
-    }
-
-    async fn handler_meta_event<'a>(&'a self, action: ActionId, args: Body)
-    where
-        Body: 'a,
-    {
-        let action_ident = MemberIdent::Id(action);
-        let signal = match self.meta().signal(&action_ident) {
-            Some(signal) => signal,
-            None => {
-                info!(
-                    signal = %action_ident,
-                    "event request discarded: signal not found"
-                );
-                return;
-            }
-        };
-        match args.deserialize_seed(value::de::ValueType(signal.signature.to_type())) {
-            Ok(args) => self.meta_event(action_ident, args).await,
-            Err(err) => info!(
-                error = &err as &dyn std::error::Error,
-                "event request discarded: failed to deserialize arguments"
-            ),
-        };
-    }
-}
-
-impl<Body, O> HandlerExt<Body> for O
-where
-    O: Object + Sync + ?Sized,
-    Body: messaging::Body + Send,
-    Body::Error: std::error::Error + Send + Sync + 'static,
-{
 }
 
 #[cfg(test)]
@@ -568,9 +501,9 @@ mod tests {
     }
 
     impl Method {
-        fn from_ident(ident: &MemberIdent) -> Option<Self> {
+        fn from_name_or_id(name_or_id: &ActionNameOrId) -> Option<Self> {
             let Meta { object, methods } = Meta::get();
-            object.method(ident).and_then(|method| {
+            object.method(name_or_id).and_then(|method| {
                 let id = method.uid;
                 if id == methods.add {
                     Some(Method::Add)
@@ -590,7 +523,7 @@ mod tests {
             })
         }
 
-        fn call(self, calc: &mut Calculator, args: Value<'_>) -> Result<Value<'static>, Error> {
+        fn call(self, calc: &mut Calculator, args: Value<'_>) -> Result<Value<'static>> {
             Ok(match &self {
                 Self::Add => {
                     let arg = args.cast_into().map_err(ValueConversionError::Arguments)?;
@@ -631,19 +564,19 @@ mod tests {
 
         async fn meta_call(
             &self,
-            ident: MemberIdent,
+            name_or_id: ActionNameOrId,
             args: Value<'_>,
-        ) -> Result<Value<'static>, Error> {
-            Method::from_ident(&ident)
-                .ok_or_else(|| Error::MethodNotFound(ident))?
+        ) -> Result<Value<'static>> {
+            Method::from_name_or_id(&name_or_id)
+                .ok_or_else(|| Error::MethodNotFound(name_or_id))?
                 .call(&mut *self.lock().await, args)
         }
 
-        async fn meta_post(&self, ident: MemberIdent, args: Value<'_>) {
-            let _res = self.meta_call(ident, args).await;
+        async fn meta_post(&self, name_or_id: ActionNameOrId, args: Value<'_>) {
+            let _res = self.meta_call(name_or_id, args).await;
         }
 
-        async fn meta_event(&self, _ident: MemberIdent, _value: Value<'_>) {
+        async fn meta_event(&self, _name_or_id: ActionNameOrId, _value: Value<'_>) {
             // no signal
         }
     }
@@ -663,14 +596,14 @@ mod tests {
         assert_eq!(res, 128);
         let res: i32 = calc.call("clamp", (32, 127)).await.unwrap();
         assert_eq!(res, 127);
-        let res: Result<i32, _> = calc.call("div", 0).await;
+        let res: Result<i32> = calc.call("div", 0).await;
         assert_matches!(res, Err(Error::Other(err)) => {
             assert!(err.downcast::<DivisionByZeroError>().is_ok())
         });
-        let res: Result<i32, _> = calc.call("log", 1).await;
+        let res: Result<i32> = calc.call("log", 1).await;
         assert_matches!(
             res,
-            Err(Error::MethodNotFound(ident)) => assert_eq!(ident, "log")
+            Err(Error::MethodNotFound(name_or_id)) => assert_eq!(name_or_id, "log")
         );
         let res: i32 = calc.call("ans", ()).await.unwrap();
         assert_eq!(res, 127);

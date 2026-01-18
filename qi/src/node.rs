@@ -6,7 +6,7 @@ use crate::{
     service_directory::{self, ServiceDirectory},
     session,
     value::os::MachineId,
-    Address, BoxObject, Error, Object, ObjectClient, Result,
+    Address, ArcObject, Error, Object, ObjectClient, Result,
 };
 use async_trait::async_trait;
 use futures::{stream, StreamExt, TryStreamExt};
@@ -28,27 +28,29 @@ pub struct InitializingNode<Method> {
     uid: Uid,
     authenticator: Option<Arc<dyn Authenticator + Send + Sync>>,
     bind_addresses: Vec<Address>,
-    pending_services: HashMap<String, BoxObject>,
+    pending_services: HashMap<String, ArcObject>,
     services: service::SharedServices,
     method: Method,
 }
 
 impl<Method> InitializingNode<Method> {
-    pub fn with_authenticator<Auth>(&mut self, authenticator: Auth) -> &mut Self
-    where
-        Auth: Authenticator + Send + Sync + 'static,
-    {
-        self.authenticator = Some(Arc::new(authenticator));
+    pub fn with_authenticator(
+        &mut self,
+        authenticator: Arc<dyn Authenticator + Send + Sync>,
+    ) -> &mut Self {
+        self.authenticator = Some(authenticator);
         self
     }
 
-    pub fn add_service<Name, Obj>(&mut self, name: Name, object: Obj) -> &mut Self
+    pub fn add_service<Name>(
+        &mut self,
+        name: Name,
+        object: Arc<dyn Object + Send + Sync>,
+    ) -> &mut Self
     where
-        Name: std::string::ToString,
-        Obj: Object + Send + Sync + 'static,
+        Name: Into<String>,
     {
-        self.pending_services
-            .insert(name.to_string(), BoxObject::new(object));
+        self.pending_services.insert(name.into(), object.into());
         self
     }
 
@@ -158,7 +160,7 @@ where
         services: &service::SharedServices,
         service_directory: &SD,
         name: String,
-        object: BoxObject,
+        object: ArcObject,
         endpoints: Vec<session::Target>,
     ) -> Result<()>
     where

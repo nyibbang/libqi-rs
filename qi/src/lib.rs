@@ -51,7 +51,7 @@ pub(crate) mod session;
 pub mod signal;
 pub mod value;
 
-pub(crate) use self::{error::NoHandlerError, object::BoxObject};
+pub(crate) use self::{error::NoHandlerError, object::ArcObject};
 pub use self::{
     error::{BoxError, Error, FormatError, HandlerError},
     node::Node,

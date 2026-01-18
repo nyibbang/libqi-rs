@@ -1,9 +1,12 @@
 mod audio;
 mod config;
 
+use std::sync::Arc;
+
 use self::config::{Args, UserAndToken};
 use anyhow::{Context, Result};
 use clap::Parser;
+use qi::auth::UserTokenAuthenticator;
 use tracing::info;
 use tracing_subscriber::fmt;
 
@@ -40,13 +43,13 @@ async fn main() -> Result<()> {
     info!("creating node");
     let node = qi::node::init()
         // You can add services to the node and make them accessible to other nodes of joined spaces.
-        .add_service("AudioPlayer", AudioPlayer::new())
+        .add_service("AudioPlayer", Arc::new(AudioPlayer::new()))
         // Host the space on this node
         .bind(args.address)
         .host_space();
 
     if let Some(UserAndToken { user, token }) = args.user_and_token {
-        node.with_authenticator(qi::auth::UserTokenAuthenticator::new(user, token));
+        node.with_authenticator(Arc::new(UserTokenAuthenticator::new(user, token)));
     }
 
     let _node = node

@@ -9,7 +9,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use sealed::sealed;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 use tracing::warn;
 
 // const ACTION_ID_REGISTER_EVENT: ActionId = ActionId(0);
@@ -22,37 +22,25 @@ const ACTION_ID_SET_PROPERTY: ActionId = ActionId(6);
 // const ACTION_ID_REGISTER_EVENT_WITH_SIGNATURE: ActionId = ActionId(8);
 pub const ACTION_START_ID: ActionId = ActionId(100);
 
-pub(crate) struct BoxObject(Box<dyn Object + Send + Sync>);
+pub(crate) struct ArcObject(Arc<dyn Object + Send + Sync>);
 
-impl BoxObject {
-    pub(crate) fn new<T>(object: T) -> Self
-    where
-        T: Object + Send + Sync + 'static,
-    {
-        Self(Box::new(object))
+impl From<Arc<dyn Object + Send + Sync>> for ArcObject {
+    fn from(value: Arc<dyn Object + Send + Sync>) -> Self {
+        Self(value)
     }
 }
 
-impl std::fmt::Debug for BoxObject {
+impl std::fmt::Debug for ArcObject {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("BoxObject").field(self.0.meta()).finish()
     }
 }
 
-impl std::ops::Deref for BoxObject {
+impl std::ops::Deref for ArcObject {
     type Target = dyn Object + Send + Sync;
 
     fn deref(&self) -> &Self::Target {
         &*self.0
-    }
-}
-
-impl<T> From<T> for BoxObject
-where
-    T: Into<Box<dyn Object + Send + Sync>>,
-{
-    fn from(object: T) -> Self {
-        Self(object.into())
     }
 }
 

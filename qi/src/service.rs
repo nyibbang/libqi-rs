@@ -2,7 +2,7 @@ use crate::{
     messaging::{self, message},
     node, object, session,
     value::{self, os, FormatInto, IntoFormat},
-    BoxObject, Error, HandlerError, NoHandlerError, Object, Result,
+    ArcObject, Error, HandlerError, NoHandlerError, Object, Result,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -175,11 +175,11 @@ impl<'a> value::FromValue<'a> for ObjectUidAsStr {
 #[derive(Default)]
 struct Service {
     info: Info,
-    bound_objects: HashMap<object::Id, BoxObject>,
+    bound_objects: HashMap<object::Id, ArcObject>,
 }
 
 impl Service {
-    pub(super) fn new(info: Info, main_object: BoxObject) -> Self {
+    pub(super) fn new(info: Info, main_object: ArcObject) -> Self {
         Self {
             info,
             bound_objects: [(MAIN_OBJECT_ID, main_object)].into_iter().collect(),
@@ -200,7 +200,7 @@ impl std::fmt::Debug for Service {
 pub(super) struct Services(HashMap<Id, Service>);
 
 impl Services {
-    fn insert_handler(&mut self, info: Info, service_object: BoxObject) {
+    fn insert_handler(&mut self, info: Info, service_object: ArcObject) {
         self.0.insert(info.id(), Service::new(info, service_object));
     }
 
@@ -240,7 +240,7 @@ impl Services {
     fn get_request_handler(
         &self,
         address: message::Address,
-    ) -> Option<(&BoxObject, object::ActionId)> {
+    ) -> Option<(&ArcObject, object::ActionId)> {
         let message::Address(service_id, object_id, action_id) = address;
         let object = self
             .0
@@ -325,7 +325,7 @@ pub(super) struct SharedServices {
 }
 
 impl SharedServices {
-    pub(super) async fn add(&self, info: Info, object: BoxObject) {
+    pub(super) async fn add(&self, info: Info, object: ArcObject) {
         self.services.lock().await.insert_handler(info, object)
     }
 

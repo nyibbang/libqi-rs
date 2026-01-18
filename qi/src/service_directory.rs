@@ -2,8 +2,8 @@ use crate::{
     object::{self, Object, ObjectExt, SignalClient},
     service, session,
     value::{
-        object::{MetaMethod, MetaObject},
-        os, ActionId, Reflect, Value,
+        object::{ActionId, MetaMethod, MetaObject},
+        os, Reflect, Value,
     },
     BasicSignal, Signal,
 };

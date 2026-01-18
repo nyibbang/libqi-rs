@@ -2,9 +2,10 @@ pub use crate::value::object::*;
 use crate::{
     error::ValueConversionError,
     messaging::message,
+    service,
     session::Session,
     signal,
-    value::{self, Dynamic, FromValue, IntoValue, ServiceId, Value},
+    value::{self, Dynamic, FromValue, IntoValue, Value},
     Error, Result, Signal,
 };
 use async_trait::async_trait;
@@ -116,7 +117,7 @@ impl<O> ObjectExt for O where O: Object + Sync + ?Sized {}
 
 #[derive(Debug, Clone)]
 pub struct ObjectClient {
-    service_id: ServiceId,
+    service_id: service::Id,
     id: Id,
     uid: Uid,
     meta: MetaObject,
@@ -125,7 +126,7 @@ pub struct ObjectClient {
 
 impl ObjectClient {
     pub(super) fn new(
-        service_id: ServiceId,
+        service_id: service::Id,
         id: Id,
         uid: Uid,
         meta: MetaObject,
@@ -143,7 +144,7 @@ impl ObjectClient {
 
 impl ObjectClient {
     pub(super) async fn connect(
-        service_id: ServiceId,
+        service_id: service::Id,
         id: Id,
         uid: Uid,
         session: Session,
@@ -160,7 +161,7 @@ impl ObjectClient {
 
     async fn fetch_meta_object(
         session: &Session,
-        service_id: ServiceId,
+        service_id: service::Id,
         id: Id,
     ) -> Result<MetaObject> {
         Ok(session
@@ -340,7 +341,7 @@ mod tests {
     use once_cell::sync::Lazy;
     use qi_value::{
         object::{MetaMethod, MetaObject},
-        ActionId, Type, Value,
+        Type, Value,
     };
     use tokio::sync::Mutex;
 

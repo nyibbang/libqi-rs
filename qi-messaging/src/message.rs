@@ -1,7 +1,9 @@
-use crate::format;
+use crate::{
+    format,
+    value::{object, service, KeyDynValueMap},
+};
 use bytes::Bytes;
 use qi_value::Dynamic;
-pub use qi_value::{ActionId as Action, KeyDynValueMap, ObjectId as Object, ServiceId as Service};
 
 #[derive(
     Default,
@@ -91,30 +93,30 @@ impl Type {
     serde::Deserialize,
 )]
 #[display("{{{_0}.{_1}.{_2}}}")]
-pub struct Address(pub Service, pub Object, pub Action);
+pub struct Address(pub service::Id, pub object::Id, pub object::ActionId);
 
 impl Address {
-    pub const fn service(&self) -> Service {
+    pub const fn service(&self) -> service::Id {
         self.0
     }
 
-    pub const fn with_service(&self, service: Service) -> Self {
+    pub const fn with_service(&self, service: service::Id) -> Self {
         Self(service, self.1, self.2)
     }
 
-    pub const fn object(&self) -> Object {
+    pub const fn object(&self) -> object::Id {
         self.1
     }
 
-    pub const fn with_object(&self, object: Object) -> Self {
+    pub const fn with_object(&self, object: object::Id) -> Self {
         Self(self.0, object, self.2)
     }
 
-    pub const fn action(&self) -> Action {
+    pub const fn action(&self) -> object::ActionId {
         self.2
     }
 
-    pub const fn with_action(&self, action: Action) -> Self {
+    pub const fn with_action(&self, action: object::ActionId) -> Self {
         Self(self.0, self.1, action)
     }
 }

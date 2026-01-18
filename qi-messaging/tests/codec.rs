@@ -2,7 +2,8 @@ use assert_matches::assert_matches;
 use bytes::{Bytes, BytesMut};
 use qi_messaging::{
     codec::{DecodeError, Decoder, Encoder},
-    message::{Action, Address, Id, Object, Service, Version},
+    message::{Address, Id, Version},
+    value::{object, service},
     Message,
 };
 use qi_value::{IntoValue, KeyDynValueMap};
@@ -113,7 +114,7 @@ fn decoder_success() {
         res,
         Ok(Some(Message::Event {
             id: Id(1),
-            address: Address(Service(1), Object(1), Action(1)),
+            address: Address(service::Id(1), object::Id(1), object::ActionId(1)),
             payload
         })) => {
             assert_eq!(payload, [2, 0, 0, 0, b'h', b'i'].as_slice());
@@ -137,7 +138,7 @@ fn encoder_success() {
 fn message_encode() {
     let msg = Message::Capabilities {
         id: Id(329),
-        address: Address(Service(1), Object(1), Action(104)),
+        address: Address(service::Id(1), object::Id(1), object::ActionId(104)),
         capabilities: KeyDynValueMap::from_iter([("hello".to_owned(), "world".into_value())]),
     };
     let mut buf = BytesMut::new();

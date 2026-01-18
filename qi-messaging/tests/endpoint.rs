@@ -9,7 +9,8 @@ use qi_format::{from_slice, to_bytes};
 use qi_messaging::{
     endpoint,
     handler::CallError,
-    message::{self, Action, Address, Id, Object, Service},
+    message::{self, Address, Id},
+    value::{object, service},
     CallHandler, CapabilitiesHandler, Error, EventHandler, Message, PostHandler,
 };
 use qi_value::{KeyDynValueMap, Value};
@@ -37,7 +38,7 @@ fn client_call() {
     assert_pending!(outgoing.poll_next());
 
     let mut call = task::spawn(client.call(
-        Address(Service(1), Object(2), Action(3)),
+        Address(service::Id(1), object::Id(2), object::ActionId(3)),
         to_bytes(&HandlerValue::Ok("My name is Alice")).unwrap(),
     ));
     assert_pending!(call.poll());
@@ -50,7 +51,7 @@ fn client_call() {
         message,
         Message::Call {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             payload,
         } => {
             let value = from_slice::<HandlerValue>(&payload).unwrap();
@@ -61,7 +62,7 @@ fn client_call() {
     incoming_messages_sender
         .try_send(Ok(Message::Reply {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             payload: to_bytes(&HandlerValue::Ok("Hello Alice (from server)")).unwrap(),
         }))
         .expect("could not send call reply");
@@ -85,7 +86,7 @@ fn client_call_error() {
     assert_pending!(outgoing.poll_next());
 
     let mut call = task::spawn(client.call(
-        Address(Service(1), Object(2), Action(3)),
+        Address(service::Id(1), object::Id(2), object::ActionId(3)),
         Bytes::from_static(b"My name is Alice"),
     ));
     assert_pending!(call.poll());
@@ -98,7 +99,7 @@ fn client_call_error() {
     incoming_messages_sender
         .try_send(Ok(Message::Error {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             error: "I don't know anyone named Alice".to_owned(),
         }))
         .expect("could not send call error");
@@ -123,7 +124,7 @@ fn client_call_canceled() {
     assert_pending!(outgoing.poll_next());
 
     let mut call = task::spawn(client.call(
-        Address(Service(1), Object(2), Action(3)),
+        Address(service::Id(1), object::Id(2), object::ActionId(3)),
         Bytes::from_static(b"My name is Alice"),
     ));
     assert_pending!(call.poll());
@@ -136,7 +137,7 @@ fn client_call_canceled() {
     incoming_messages_sender
         .try_send(Ok(Message::Canceled {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
         }))
         .expect("could not send call canceled");
     assert_pending!(outgoing.poll_next());
@@ -155,7 +156,7 @@ fn client_post() {
     assert_pending!(outgoing.poll_next());
 
     let mut send = task::spawn(client.post(
-        Address(Service(1), Object(2), Action(3)),
+        Address(service::Id(1), object::Id(2), object::ActionId(3)),
         Bytes::from_static(b"Say hi to Bob for me"),
     ));
     assert_ready_ok!(send.poll());
@@ -168,7 +169,7 @@ fn client_post() {
         message,
         Message::Post {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             payload
         } => {
             assert_eq!(payload, b"Say hi to Bob for me".as_slice());
@@ -185,7 +186,7 @@ fn client_event() {
     assert_pending!(outgoing.poll_next());
 
     let mut send = task::spawn(client.send_event(
-        Address(Service(1), Object(2), Action(3)),
+        Address(service::Id(1), object::Id(2), object::ActionId(3)),
         Bytes::from_static(b"Carol says hi by the way"),
     ));
     assert_ready_ok!(send.poll());
@@ -198,7 +199,7 @@ fn client_event() {
         message,
         Message::Event {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             payload
         } => {
             assert_eq!(payload, b"Carol says hi by the way".as_slice());
@@ -230,7 +231,7 @@ fn handler_call() {
     incoming_messages_sender
         .try_send(Ok(Message::Call {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             payload: to_bytes(&HandlerValue::Ok("My name is Alice")).unwrap(),
         }))
         .expect("failed to send call message");
@@ -243,7 +244,7 @@ fn handler_call() {
         message,
         Message::Reply {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             payload
         } => {
             let value = from_slice::<&str>(&payload).unwrap();
@@ -265,7 +266,7 @@ fn handler_call_error() {
     incoming_messages_sender
         .try_send(Ok(Message::Call {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             payload: to_bytes(&Err::<&str, _>(HandlerError {
                 message: "bad request".to_owned(),
                 is_canceled: false,
@@ -282,7 +283,7 @@ fn handler_call_error() {
         message,
         Message::Error {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             error
         } => {
             assert_eq!(error.to_string(), "bad request");
@@ -303,7 +304,7 @@ fn handler_call_error_fatal() {
     incoming_messages_sender
         .try_send(Ok(Message::Call {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             payload: to_bytes(&Err::<&str, _>(HandlerError {
                 message: "fatal request".to_owned(),
                 is_canceled: false,
@@ -321,7 +322,7 @@ fn handler_call_error_fatal() {
         message,
         Message::Error {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             error
         } => {
             assert_eq!(error.to_string(), "fatal request");
@@ -345,7 +346,7 @@ fn handler_call_canceled() {
     incoming_messages_sender
         .try_send(Ok(Message::Call {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
             payload: to_bytes(&HandlerValue::Err(HandlerError {
                 message: "canceled".to_owned(),
                 is_canceled: true,
@@ -363,7 +364,7 @@ fn handler_call_canceled() {
         message,
         Message::Canceled {
             id: Id(1),
-            address: Address(Service(3), Object(2), Action(1)),
+            address: Address(service::Id(3), object::Id(2), object::ActionId(1)),
         }
     );
 }
@@ -454,7 +455,7 @@ fn handler_post() {
     incoming_messages_sender
         .try_send(Ok(Message::Post {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             payload: Bytes::from_static(b"Bob says hi back"),
         }))
         .expect("could not send post message");
@@ -464,7 +465,7 @@ fn handler_post() {
     let post = assert_ready!(posts.poll_next());
     assert_matches!(
         post,
-        Some((Address(Service(1), Object(2), Action(3)), args)) => {
+        Some((Address(service::Id(1), object::Id(2), object::ActionId(3)), args)) => {
             assert_eq!(args, Bytes::from_static(b"Bob says hi back"));
         }
     );
@@ -485,7 +486,7 @@ fn handler_event() {
     incoming_messages_sender
         .try_send(Ok(Message::Event {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             payload: Bytes::from_static(b"Carol received your 'hi'"),
         }))
         .expect("could not send event message");
@@ -496,7 +497,7 @@ fn handler_event() {
     assert_matches!(
         event,
         Some((
-            Address(Service(1), Object(2), Action(3)),
+            Address(service::Id(1), object::Id(2), object::ActionId(3)),
             args,
         )) => {
             assert_eq!(args, b"Carol received your 'hi'".as_slice());
@@ -519,7 +520,7 @@ fn handler_capabilities() {
     incoming_messages_sender
         .try_send(Ok(Message::Capabilities {
             id: Id(1),
-            address: Address(Service(1), Object(2), Action(3)),
+            address: Address(service::Id(1), object::Id(2), object::ActionId(3)),
             capabilities: KeyDynValueMap::from_iter([("SayHi".to_owned(), Value::Bool(false))]),
         }))
         .expect("could not send capabilties message");
@@ -530,7 +531,7 @@ fn handler_capabilities() {
     assert_eq!(
         capabilities,
         Some((
-            Address(Service(1), Object(2), Action(3)),
+            Address(service::Id(1), object::Id(2), object::ActionId(3)),
             KeyDynValueMap::from_iter([("SayHi".to_owned(), Value::Bool(false),)])
         ))
     );

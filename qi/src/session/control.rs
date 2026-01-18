@@ -2,8 +2,8 @@ use super::capabilities;
 use crate::{
     auth::{self, Authenticator},
     error::{HandlerError, NoHandlerError},
-    messaging,
-    value::{ActionId, FormatInto, IntoFormat, KeyDynValueMap, ObjectId, ServiceId},
+    messaging, object, service,
+    value::{FormatInto, IntoFormat, KeyDynValueMap},
     Error,
 };
 use bytes::Bytes;
@@ -15,9 +15,9 @@ use messaging::message;
 use std::{future::Future, sync::Arc};
 use tokio::sync::watch;
 
-const SERVICE_ID: ServiceId = ServiceId(0);
-const OBJECT_ID: ObjectId = ObjectId(0);
-const AUTHENTICATE_ACTION_ID: ActionId = ActionId(8);
+const SERVICE_ID: service::Id = service::Id(0);
+const OBJECT_ID: object::Id = object::Id(0);
+const AUTHENTICATE_ACTION_ID: object::ActionId = object::ActionId(8);
 
 fn is_control_address(address: message::Address) -> bool {
     address.service() == SERVICE_ID && address.object() == OBJECT_ID

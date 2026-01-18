@@ -1,5 +1,4 @@
-use crate::{os, ty, FromValue, FromValueError, IntoValue, Map, ServiceId, Signature, Type, Value};
-pub use crate::{ActionId, ObjectId as Id};
+use crate::{os, service, ty, FromValue, FromValueError, IntoValue, Map, Signature, Type, Value};
 use sha1_smol::Sha1;
 
 #[derive(
@@ -16,7 +15,7 @@ use sha1_smol::Sha1;
 )]
 pub struct Object {
     pub meta_object: MetaObject,
-    pub service_id: ServiceId,
+    pub service_id: service::Id,
     pub object_id: Id,
     pub object_uid: Uid,
 }
@@ -111,6 +110,64 @@ impl PartialEq<[u8; 20]> for Uid {
 impl PartialEq<Uid> for [u8; 20] {
     fn eq(&self, other: &Uid) -> bool {
         self == &other.0
+    }
+}
+
+#[derive(
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    qi_macros::Valuable,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::Display,
+    derive_more::From,
+    derive_more::Into,
+)]
+#[serde(transparent)]
+#[qi(value(crate = "crate", transparent))]
+pub struct Id(pub u32);
+
+#[derive(
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Debug,
+    qi_macros::Valuable,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::Display,
+    derive_more::From,
+    derive_more::Into,
+)]
+#[serde(transparent)]
+#[qi(value(crate = "crate", transparent))]
+pub struct ActionId(pub u32);
+
+impl ActionId {
+    pub fn wrapping_next(&mut self) -> Self {
+        let old_id = self.0;
+        self.0 = self.0.wrapping_add(1);
+        Self(old_id)
+    }
+}
+
+impl Iterator for ActionId {
+    type Item = Self;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.wrapping_next())
     }
 }
 

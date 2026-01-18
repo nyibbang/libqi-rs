@@ -14,7 +14,7 @@ use tokio::{
     task,
 };
 use tracing::info;
-pub use value::ServiceId as Id;
+pub use value::service::*;
 
 pub(super) const MAIN_OBJECT_ID: object::Id = object::Id(1);
 const UNSPECIFIED_ID: Id = Id(0);

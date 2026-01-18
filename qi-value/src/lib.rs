@@ -43,12 +43,12 @@
 
 mod as_raw;
 pub mod dynamic;
-mod ids;
 mod kv_map;
 pub mod map;
 pub mod object;
 pub mod os;
 mod reflect;
+pub mod service;
 pub mod signature;
 pub mod ty;
 pub mod value;
@@ -57,7 +57,6 @@ pub mod value;
 pub use crate::{
     as_raw::AsRaw,
     dynamic::{AsDynamic, AsDynamicOwned, Dynamic},
-    ids::{ActionId, ObjectId, ServiceId},
     kv_map::KeyDynValueMap,
     map::Map,
     object::Object,

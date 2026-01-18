@@ -1,8 +1,8 @@
 use pretty_assertions::assert_eq;
 use qi_format::{from_slice, to_bytes};
 use qi_value::{
-    object::{MetaMethod, MetaObject, MetaProperty, MetaSignal, Object},
-    os, ActionId, Dynamic, Map, ObjectId, Reflect, ServiceId, Signature, Type,
+    object::{self, ActionId, MetaMethod, MetaObject, MetaProperty, MetaSignal, Object},
+    os, service, Dynamic, Map, Reflect, Signature, Type,
 };
 use serde_with::serde_as;
 use std::{collections::BTreeMap, str::FromStr};
@@ -492,8 +492,8 @@ fn object_descr_from_to_format() {
                 )]),
                 description: String::new(),
             },
-            service_id: ServiceId(2),
-            object_id: ObjectId(4),
+            service_id: service::Id(2),
+            object_id: object::Id(4),
             object_uid: [
                 0x0b, 0xf8, 0xf7, 0x86, 0x6b, 0x07, 0x04, 0x05, 0xd6, 0x3f, 0xe4, 0x39, 0xf9, 0x47,
                 0x7e, 0x96, 0xfc, 0x2f, 0x2c, 0x3d

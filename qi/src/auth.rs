@@ -1,25 +1,7 @@
 use qi_value::{KeyDynValueMap, Value};
 
 pub trait Authenticator {
-    fn verify(&self, parameters: KeyDynValueMap) -> Result<(), Error>;
-}
-
-impl<T> Authenticator for Box<T>
-where
-    T: Authenticator + ?Sized,
-{
-    fn verify(&self, parameters: KeyDynValueMap) -> Result<(), Error> {
-        (**self).verify(parameters)
-    }
-}
-
-impl<T> Authenticator for std::sync::Arc<T>
-where
-    T: Authenticator + ?Sized,
-{
-    fn verify(&self, parameters: KeyDynValueMap) -> Result<(), Error> {
-        (**self).verify(parameters)
-    }
+    fn authenticate(&self, parameters: KeyDynValueMap) -> Result<(), Error>;
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -35,7 +17,7 @@ impl UserTokenAuthenticator {
 }
 
 impl Authenticator for UserTokenAuthenticator {
-    fn verify(&self, mut parameters: KeyDynValueMap) -> Result<(), Error> {
+    fn authenticate(&self, mut parameters: KeyDynValueMap) -> Result<(), Error> {
         let user: String = parameters
             .remove(USER_KEY)
             .ok_or_else(|| Error::UserValue("missing".to_owned()))?

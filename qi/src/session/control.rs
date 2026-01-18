@@ -42,7 +42,7 @@ impl Controller {
         capabilities::check_required(&shared_capabilities)?;
         if let Some(authenticator) = &self.authenticator {
             authenticator
-                .verify(request)
+                .authenticate(request)
                 .map_err(AuthenticateClientError::AuthenticationVerification)?;
         }
         self.capabilities

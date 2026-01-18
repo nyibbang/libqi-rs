@@ -22,16 +22,6 @@ where
     }
 }
 
-// TODO: remove this, authenticator is already an optional
-#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct PermissiveAuthenticator;
-
-impl Authenticator for PermissiveAuthenticator {
-    fn verify(&self, _parameters: KeyDynValueMap) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct UserTokenAuthenticator {
     user: String,

@@ -2,12 +2,13 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::{
     parse::{Parse, ParseStream},
-    AttrStyle, Attribute, Expr, ExprLit, ItemTrait, Lit, LitStr, Meta, MetaNameValue, Result,
-    TraitItem, TraitItemFn,
+    parse_str, AttrStyle, Attribute, Expr, ExprLit, ItemTrait, Lit, LitStr, MetaNameValue, Path,
+    Result, TraitItem, TraitItemFn,
 };
 
 #[derive(Debug)]
 pub(super) struct ObjectTrait {
+    crate_path: Path,
     trait_item: ItemTrait,
     name: String,
     methods: Vec<Method>,
@@ -27,12 +28,18 @@ impl Parse for ObjectTrait {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut trait_item = ItemTrait::parse(input)?;
 
-        let description = trait_item
-            .attrs
-            .iter()
-            .filter_map(attribute_outer_doc)
-            .collect();
-
+        let (description, crate_path) = trait_item.attrs.iter().fold(
+            (Vec::new(), None),
+            |(mut description, mut crate_path), attr| {
+                if let Some(doc) = attribute_outer_doc(attr) {
+                    description.push(doc);
+                } else if let Some(path) = attribute_outer_crate(attr) {
+                    crate_path.replace(path);
+                }
+                (description, crate_path)
+            },
+        );
+        let crate_path = crate_path.unwrap_or(parse_str("::qi")?);
         let items_len = trait_item.items.len();
         let mut methods = Vec::with_capacity(items_len);
         let mut signals = Vec::with_capacity(items_len);
@@ -55,6 +62,7 @@ impl Parse for ObjectTrait {
             signals,
             properties,
             description,
+            crate_path,
         })
     }
 }
@@ -108,6 +116,28 @@ fn attribute_outer_doc(attr: &Attribute) -> Option<LitStr> {
     };
 
     Some(doc_str.clone())
+}
+
+fn attribute_outer_crate(attr: &Attribute) -> Option<Path> {
+    if attr.style != AttrStyle::Outer {
+        return None;
+    }
+    if !attr.path().is_ident("qi") {
+        return None;
+    }
+    let mut crate_path = None;
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("crate") {
+            let path = meta.value()?; // parses the '='
+            let path: LitStr = path.parse()?;
+            crate_path.replace(path.parse()?);
+            Ok(())
+        } else {
+            Err(meta.error("unknown attribute"))
+        }
+    })
+    .ok()?;
+    crate_path
 }
 
 fn trait_fn_item(item: &mut TraitItem, tag: &str) -> Option<TraitItemFn> {

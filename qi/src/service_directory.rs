@@ -1,11 +1,11 @@
 use crate::{
-    object::{self, Object, ObjectExt, SignalClient},
+    object::{self, Object, ObjectExt},
     service, session,
+    signal::SignalConnection,
     value::{
         object::{ActionId, MetaMethod, MetaObject},
         os, Reflect, Value,
     },
-    BasicSignal, Signal,
 };
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -14,6 +14,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
+use tokio::sync::broadcast;
 
 pub(super) const SD_SERVICE_NAME: &str = "ServiceDirectory";
 const SD_SERVICE_ID: service::Id = service::Id(1);
@@ -22,8 +23,6 @@ const SD_SERVICE_ID: service::Id = service::Id(1);
 #[async_trait]
 pub trait ServiceDirectory {
     type Error;
-    type ServiceAdded: Signal<Value = (service::Id, String)>;
-    type ServiceRemoved: Signal<Value = (service::Id, String)>;
 
     #[qi::method]
     async fn services(&self) -> Result<Vec<service::Info>, Self::Error>;
@@ -43,69 +42,37 @@ pub trait ServiceDirectory {
     #[qi::method(name = "updateServiceInfo")]
     async fn update(&self, info: &service::Info) -> Result<(), Self::Error>;
 
-    #[qi::signal(name = "serviceAdded")]
-    fn service_added(&self) -> Self::ServiceAdded;
+    #[qi::signal(name = "serviceAdded", type = "(service::Id, String)")]
+    fn connect_service_added(&self) -> SignalConnection<(service::Id, String)>;
 
-    #[qi::signal(name = "serviceRemoved")]
-    fn service_removed(&self) -> Self::ServiceRemoved;
+    #[qi::signal(name = "serviceRemoved", type = "(service::Id, String)")]
+    fn connect_service_removed(&self) -> SignalConnection<(service::Id, String)>;
 
     #[qi::method(name = "machineId")]
     async fn machine_id(&self) -> Result<os::MachineId, Self::Error>;
 }
 
-#[async_trait]
-impl<T> ServiceDirectory for Arc<T>
-where
-    T: ServiceDirectory + Send + Sync,
-{
-    type Error = T::Error;
-    type ServiceAdded = T::ServiceAdded;
-    type ServiceRemoved = T::ServiceRemoved;
-
-    async fn services(&self) -> Result<Vec<service::Info>, Self::Error> {
-        (**self).services().await
-    }
-
-    async fn service(&self, name: &str) -> Result<service::Info, Self::Error> {
-        (**self).service(name).await
-    }
-
-    async fn register(&self, info: &service::Info) -> Result<service::Id, Self::Error> {
-        (**self).register(info).await
-    }
-
-    async fn unregister(&self, id: service::Id) -> Result<(), Self::Error> {
-        (**self).unregister(id).await
-    }
-
-    async fn set_ready(&self, id: service::Id) -> Result<(), Self::Error> {
-        (**self).set_ready(id).await
-    }
-
-    async fn update(&self, info: &service::Info) -> Result<(), Self::Error> {
-        (**self).update(info).await
-    }
-
-    fn service_added(&self) -> Self::ServiceAdded {
-        (**self).service_added()
-    }
-
-    fn service_removed(&self) -> Self::ServiceRemoved {
-        (**self).service_removed()
-    }
-
-    async fn machine_id(&self) -> Result<os::MachineId, Self::Error> {
-        (**self).machine_id().await
-    }
-}
-
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ServiceInfoMap {
     pending_services: HashMap<service::Id, service::Info>,
     services: HashMap<service::Id, service::Info>,
     service_id_iter: ServiceIdIterator,
-    added: Arc<BasicSignal<(service::Id, String)>>,
-    removed: Arc<BasicSignal<(service::Id, String)>>,
+    added: broadcast::Sender<(service::Id, String)>,
+    removed: broadcast::Sender<(service::Id, String)>,
+}
+
+impl Default for ServiceInfoMap {
+    fn default() -> Self {
+        let (added, _) = broadcast::channel(16);
+        let (removed, _) = broadcast::channel(16);
+        Self {
+            pending_services: HashMap::default(),
+            services: HashMap::default(),
+            service_id_iter: ServiceIdIterator::default(),
+            added,
+            removed,
+        }
+    }
 }
 
 impl ServiceInfoMap {
@@ -118,10 +85,8 @@ impl ServiceInfoMap {
 }
 
 #[async_trait]
-impl ServiceDirectory for RwLock<ServiceInfoMap> {
+impl ServiceDirectory for Arc<RwLock<ServiceInfoMap>> {
     type Error = Error;
-    type ServiceAdded = Arc<BasicSignal<(service::Id, String)>>;
-    type ServiceRemoved = Arc<BasicSignal<(service::Id, String)>>;
 
     async fn services(&self) -> Result<Vec<service::Info>, Self::Error> {
         Ok(read(self).services.values().cloned().collect())
@@ -179,12 +144,12 @@ impl ServiceDirectory for RwLock<ServiceInfoMap> {
         Ok(())
     }
 
-    fn service_added(&self) -> Self::ServiceAdded {
-        Arc::clone(&read(self).added)
+    fn connect_service_added(&self) -> SignalConnection<(service::Id, String)> {
+        todo!()
     }
 
-    fn service_removed(&self) -> Self::ServiceRemoved {
-        Arc::clone(&read(self).removed)
+    fn connect_service_removed(&self) -> SignalConnection<(service::Id, String)> {
+        todo!()
     }
 
     async fn machine_id(&self) -> Result<os::MachineId, Self::Error> {
@@ -286,8 +251,6 @@ impl Object for Client {
 #[async_trait]
 impl ServiceDirectory for Client {
     type Error = crate::Error;
-    type ServiceAdded = object::SignalClient<(service::Id, String)>;
-    type ServiceRemoved = object::SignalClient<(service::Id, String)>;
 
     async fn services(&self) -> Result<Vec<service::Info>, Self::Error> {
         self.0.call(Meta::get().services, ()).await
@@ -313,12 +276,12 @@ impl ServiceDirectory for Client {
         self.0.call(Meta::get().update_service_info, info).await
     }
 
-    fn service_added(&self) -> Self::ServiceAdded {
-        SignalClient::new(self.0.clone(), Meta::get().service_added)
+    fn connect_service_added(&self) -> SignalConnection<(service::Id, String)> {
+        todo!()
     }
 
-    fn service_removed(&self) -> Self::ServiceRemoved {
-        SignalClient::new(self.0.clone(), Meta::get().service_removed)
+    fn connect_service_removed(&self) -> SignalConnection<(service::Id, String)> {
+        todo!()
     }
 
     async fn machine_id(&self) -> Result<os::MachineId, Self::Error> {

@@ -4,9 +4,8 @@ use crate::{
     messaging::message,
     service,
     session::Session,
-    signal,
     value::{self, Dynamic, FromValue, IntoValue, Value},
-    Error, Result, Signal,
+    Error, Result,
 };
 use async_trait::async_trait;
 use sealed::sealed;
@@ -273,35 +272,6 @@ impl<T> SignalClient<T> {
             id,
             ph: PhantomData,
         }
-    }
-}
-
-impl<T> Signal for SignalClient<T> {
-    type Value = T;
-    type Connection = SignalClientConnection;
-
-    fn connect<F>(&self, f: F) -> Self::Connection
-    where
-        F: FnMut(Self::Value) + Send + Sync + 'static,
-    {
-        todo!()
-    }
-}
-
-pub struct SignalClientConnection {
-    object: ObjectClient,
-    link: Option<signal::Link>,
-}
-
-impl signal::Connection for SignalClientConnection {
-    fn detach(mut self) -> Option<signal::Link> {
-        self.link.take()
-    }
-}
-
-impl Drop for SignalClientConnection {
-    fn drop(&mut self) {
-        todo!()
     }
 }
 

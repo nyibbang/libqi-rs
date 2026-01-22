@@ -57,7 +57,7 @@ pub use self::{
     node::Node,
     object::{Object, ObjectClient, ObjectExt},
     service_directory::ServiceDirectory,
-    signal::{BasicSignal, Signal},
+    signal::SignalConnection,
 };
 pub use qi_format as format;
 pub use qi_macros::{object, FromValue, IntoValue, Reflect, ToValue, Valuable};
